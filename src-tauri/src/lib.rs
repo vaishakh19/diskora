@@ -9,14 +9,20 @@
 //!   `scanner`    — the walker, aggregation, tree pruning, progress counters
 //!   `duplicates` — size grouping, hashing, byte verification
 //!   `cleanup`    — rules, findings, preview and execution
-//!   `storage`    — SQLite: settings, scan history, cached entitlement
-//!   `licensing`  — offline entitlement resolution
+//!   `storage`    — SQLite: settings, scan history, cached entitlement, activations
+//!   `licensing`  — signed payloads, offline entitlement resolution
+//!   `config`     — the centralised commercial configuration
+//!   `authz`      — the authorization layer every protected command goes through
 //!   `commands`   — the narrowly-scoped Tauri command surface
 //!
-//! The frontend never talks to anything below `commands`.
+//! The frontend never talks to anything below `commands`, and `authz` is the only place a paid
+//! capability is granted. A modified React interface cannot bypass it: the command itself calls
+//! `authorize()` before doing anything.
 
+pub mod authz;
 pub mod cleanup;
 pub mod commands;
+pub mod config;
 pub mod duplicates;
 pub mod error;
 pub mod filesystem;
@@ -61,6 +67,21 @@ pub fn run() {
                 }
             }
 
+            // Resolve the entitlement from any stored licence key, entirely offline. A failure here
+            // leaves the app on the free tier, which is a complete product.
+            let device = crate::licensing::payload::DeviceBinding::current(&data_dir);
+            let stored_key = state.stored_license_key().ok().flatten();
+            let now = crate::licensing::verify::now_millis();
+            let authorization = crate::authz::Authorization::resolve(
+                stored_key.as_deref(),
+                &crate::config::product::DEFAULT_CONFIG,
+                now,
+                device,
+            );
+            if let Ok(mut guard) = state.authorization.lock() {
+                *guard = Some(authorization);
+            }
+
             app.manage(state);
             Ok(())
         })
@@ -87,6 +108,8 @@ pub fn run() {
             commands::licensing::license_activate,
             commands::licensing::license_deactivate,
             commands::licensing::entitlement_events,
+            commands::licensing::device_activations,
+            commands::licensing::device_deactivate,
             commands::settings::settings_get,
             commands::settings::settings_update,
             commands::settings::privacy_report,

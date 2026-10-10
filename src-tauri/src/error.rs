@@ -95,3 +95,9 @@ impl From<serde_json::Error> for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        AppError::Internal(message)
+    }
+}

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
 
+use crate::config::product::DEFAULT_CONFIG;
 use crate::duplicates::grouping::{self, DuplicateOptions, DuplicateReport};
 use crate::duplicates::verify::verify_identical;
 use crate::error::{AppError, AppResult};
@@ -29,12 +30,22 @@ pub struct DuplicateProgress {
 }
 
 /// Starts duplicate detection and returns the report id immediately.
+///
+/// Basic duplicate detection is free at every tier. Finding *more* than the free group limit is
+/// gated: `UnlimitedDuplicates`. The limit is applied by the backend, not the UI, so a modified
+/// interface cannot ask for all of them.
 #[tauri::command]
 pub async fn find_duplicates(
     options: DuplicateOptions,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::BasicDuplicates)?;
+
+    // The free tier gets the first N duplicate groups, largest first, and is told so. Everything
+    // past the limit needs `UnlimitedDuplicates`, which the authorization layer enforces. The
+    // limit is applied here, in the backend, so a modified interface cannot ask for more.
+    let authorization = state.authorization()?;
     let scans = state.scans()?;
     let entry = scans
         .get(&options.scan_id)
@@ -49,6 +60,7 @@ pub async fn find_duplicates(
 
     let report_id = format!("dup-{}", crate::licensing::verify::now_millis());
     let started_at = crate::licensing::verify::now_millis();
+    let group_limit = free_group_limit(&authorization);
 
     // Mark the scan as running so the UI can show progress before the first event arrives.
     {
@@ -119,6 +131,10 @@ pub async fn find_duplicates(
             },
         );
 
+        // The free tier sees the largest N groups and nothing else. Truncation happens here, in the
+        // backend, so the limit cannot be lifted from the interface.
+        let report = grouping::limit_groups(report, group_limit);
+
         let state = progress_app.state::<AppState>();
         if let Ok(mut registry) = state.duplicate_reports.lock() {
             registry.insert(progress_id, report);
@@ -131,6 +147,7 @@ pub async fn find_duplicates(
 /// Returns a finished report, or `None` when it is unknown or still running.
 #[tauri::command]
 pub fn duplicates_get(report_id: String, state: State<'_, AppState>) -> AppResult<Option<DuplicateReport>> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::BasicDuplicates)?;
     let registry = state
         .duplicate_reports
         .lock()
@@ -141,6 +158,7 @@ pub fn duplicates_get(report_id: String, state: State<'_, AppState>) -> AppResul
 /// Byte-for-byte comparison of two files, used by the "are these really identical?" action.
 #[tauri::command]
 pub fn verify_duplicates(path_a: String, path_b: String) -> AppResult<crate::duplicates::verify::VerifyResult> {
+    // Byte-level verification of a pair is part of finding duplicates, which is free.
     for path in [&path_a, &path_b] {
         if path.trim().is_empty() {
             return Err(AppError::InvalidArgument("Two paths are required.".to_string()));
@@ -152,6 +170,14 @@ pub fn verify_duplicates(path_a: String, path_b: String) -> AppResult<crate::dup
     )
     .map_err(|error| AppError::io(&path_a, &error))?;
     Ok(result)
+}
+
+/// `None` means unlimited; otherwise the free tier's group cap.
+fn free_group_limit(authorization: &crate::authz::Authorization) -> Option<usize> {
+    if crate::authz::authorize(authorization, crate::authz::Permission::UnlimitedDuplicates).is_ok() {
+        return None;
+    }
+    Some(DEFAULT_CONFIG.free_duplicate_group_limit as usize)
 }
 
 #[cfg(test)]

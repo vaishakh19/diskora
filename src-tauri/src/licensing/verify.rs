@@ -1,16 +1,21 @@
-//! Offline entitlement resolution.
+//! Entitlement resolution.
 //!
-//! A licence key is a compact string: `<base64url payload>.<base64url signature>`. The payload is
-//! JSON describing the tier and expiry; the signature is Ed25519 over the payload bytes. Nothing is
-//! sent anywhere.
+//! An `Entitlement` is what the UI is told. It is derived from a **verified** licence payload plus
+//! the commercial configuration — never from anything the webview sent, and never from a
+//! frontend boolean.
+//!
+//! The rules that shape this module:
+//!   - verification is offline and local; no network call is required to scan,
+//!   - any failure resolves to the free tier with a reason, so the app keeps working,
+//!   - a *permanent* entitlement never expires; only the offline lease does,
+//!   - the frontend reads the entitlement, it never decides it.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use super::keys::public_key;
+use crate::config::product::{CommercialConfig, ProductTier};
+use crate::licensing::payload::{LicensePayload, LicenseError};
 
 /// Mirrors `PlanTier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +58,7 @@ impl EntitlementState {
         }
     }
 
+    /// Parses a stored state string. Unknown values become `free` (fail closed).
     pub fn parse(value: &str) -> Self {
         match value {
             "trial" => EntitlementState::Trial,
@@ -61,6 +67,11 @@ impl EntitlementState {
             "invalid" => EntitlementState::Invalid,
             _ => EntitlementState::Free,
         }
+    }
+
+    /// True when paid features are available.
+    pub fn is_paid(&self) -> bool {
+        matches!(self, EntitlementState::Trial | EntitlementState::ProActive)
     }
 }
 
@@ -105,9 +116,10 @@ impl FeatureFlags {
     }
 
     pub fn for_state(state: EntitlementState) -> Self {
-        match state {
-            EntitlementState::Trial | EntitlementState::ProActive => FeatureFlags::pro(),
-            _ => FeatureFlags::free(),
+        if state.is_paid() {
+            FeatureFlags::pro()
+        } else {
+            FeatureFlags::free()
         }
     }
 }
@@ -119,20 +131,32 @@ pub struct Entitlement {
     pub state: EntitlementState,
     pub tier: PlanTier,
     pub features: FeatureFlags,
+    /// Masked licence key, safe to show and safe to log.
     pub license_key_masked: Option<String>,
-    pub expires_at: Option<i64>,
+    /// The licence identifier, when a licence is active.
+    pub license_id: Option<String>,
+    /// `true` when the entitlement itself never expires (a one-time purchase).
+    pub permanent: bool,
+    /// When the offline validation lease ends, if it is time-limited.
+    pub lease_until: Option<i64>,
+    /// When the entitlement was last verified against the licence service.
     pub verified_at: Option<i64>,
-    pub source: String,
-    pub reason: Option<String>,
+    /// How many days of the offline lease remain. `None` for a perpetual lease.
     pub days_remaining: Option<i64>,
-    /// Free-tier duplicate group limit. `0` = unlimited.
+    /// How many devices this licence may be active on.
+    pub device_limit: u32,
+    /// How many devices are currently active.
+    pub active_devices: u32,
+    /// Where this entitlement came from: `default`, `license-key`, `cache`.
+    pub source: String,
+    /// A customer-facing reason when the tier is not what the customer expected.
+    pub reason: Option<String>,
+    /// Free-tier duplicate group limit. `0` means unlimited.
     pub duplicate_group_limit: u32,
 }
 
-/// Free-tier duplicate group limit, matching `FREE_DUPLICATE_GROUP_LIMIT` in the frontend.
+/// Free-tier duplicate group limit.
 pub const FREE_DUPLICATE_GROUP_LIMIT: u32 = 25;
-/// Trial length in days.
-pub const TRIAL_DAYS: i64 = 14;
 /// How long a cached entitlement keeps working with no re-validation.
 pub const OFFLINE_GRACE_DAYS: i64 = 30;
 
@@ -150,200 +174,198 @@ pub fn free_entitlement() -> Entitlement {
         tier: PlanTier::Free,
         features: FeatureFlags::free(),
         license_key_masked: None,
-        expires_at: None,
+        license_id: None,
+        permanent: false,
+        lease_until: None,
         verified_at: None,
+        days_remaining: None,
+        device_limit: 1,
+        active_devices: 0,
         source: "default".to_string(),
         reason: None,
-        days_remaining: None,
         duplicate_group_limit: FREE_DUPLICATE_GROUP_LIMIT,
     }
 }
 
-/// The signed contents of a licence key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LicensePayload {
-    /// `trial` or `pro`.
-    pub tier: PlanTier,
-    /// Unix milliseconds.
-    pub issued_at: i64,
-    /// Unix milliseconds, or `None` for a perpetual licence.
-    pub expires_at: Option<i64>,
-    /// Stable identifier, never an email address.
-    pub license_id: String,
-}
-
-/// Verifies a licence key offline. Returns the entitlement on success.
+/// Builds the entitlement for a **verified** payload.
 ///
-/// Any failure — bad format, bad signature, unknown key, expired — produces the free entitlement
-/// with a reason, so the app keeps working.
-pub fn entitlement_from_license(key: &str, now: i64) -> Entitlement {
-    let mut fallback = free_entitlement();
-    fallback.license_key_masked = Some(mask_key(key));
-    fallback.source = "license-key".to_string();
-
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        fallback.reason = Some("No licence key was provided.".to_string());
-        return fallback;
-    }
-
-    let mut parts = trimmed.split('.');
-    let payload_b64 = match parts.next() {
-        Some(value) if !value.is_empty() => value,
-        _ => {
-            fallback.state = EntitlementState::Invalid;
-            fallback.reason = Some("The licence key is malformed.".to_string());
-            return fallback;
+/// The caller must have already checked the signature, the schema version, the product and the
+/// device binding. This function only turns a trusted payload into something the UI can render.
+pub fn entitlement_from_payload(
+    payload: &LicensePayload,
+    tier: &ProductTier,
+    config: &CommercialConfig,
+    now: i64,
+) -> Entitlement {
+    let paid = !payload.lease_lapsed(now);
+    let state = if paid {
+        if payload.tier_id.contains("trial") {
+            EntitlementState::Trial
+        } else {
+            EntitlementState::ProActive
         }
-    };
-    let signature_b64 = match parts.next() {
-        Some(value) if !value.is_empty() => value,
-        _ => {
-            fallback.state = EntitlementState::Invalid;
-            fallback.reason = Some("The licence key has no signature.".to_string());
-            return fallback;
-        }
-    };
-    if parts.next().is_some() {
-        fallback.state = EntitlementState::Invalid;
-        fallback.reason = Some("The licence key has extra segments.".to_string());
-        return fallback;
-    }
-
-    let payload_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            fallback.state = EntitlementState::Invalid;
-            fallback.reason = Some("The licence payload is not valid base64.".to_string());
-            return fallback;
-        }
-    };
-    let signature_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_b64) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            fallback.state = EntitlementState::Invalid;
-            fallback.reason = Some("The licence signature is not valid base64.".to_string());
-            return fallback;
-        }
-    };
-
-    let payload: LicensePayload = match serde_json::from_slice(&payload_bytes) {
-        Ok(payload) => payload,
-        Err(_) => {
-            fallback.state = EntitlementState::Invalid;
-            fallback.reason = Some("The licence payload is not valid JSON.".to_string());
-            return fallback;
-        }
-    };
-
-    if !verify_signature(&payload_bytes, &signature_bytes) {
-        fallback.state = EntitlementState::Invalid;
-        fallback.reason = Some("Signature verification failed.".to_string());
-        return fallback;
-    }
-
-    let expired = match payload.expires_at {
-        Some(expiry) => now >= expiry,
-        None => false,
-    };
-
-    let (state, reason) = if expired {
-        (
-            EntitlementState::ProExpired,
-            Some("This licence has expired. Diskwise continues on the free tier.".to_string()),
-        )
     } else {
-        let state = match payload.tier {
-            PlanTier::Trial => EntitlementState::Trial,
-            _ => EntitlementState::ProActive,
-        };
-        (state, None)
+        // A lapsed lease on a permanent licence is a *re-verification* problem, not a loss of
+        // ownership. It is reported distinctly so the UI can say so.
+        EntitlementState::ProExpired
     };
 
     let days_remaining = payload
-        .expires_at
-        .map(|expiry| ((expiry - now) / 86_400_000).max(0));
+        .lease_until
+        .map(|until| ((until - now) / 86_400_000).max(0));
+
+    let reason = if !paid {
+        Some(
+            "This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected."
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
     Entitlement {
         state,
-        tier: payload.tier,
+        tier: if state.is_paid() {
+            if state == EntitlementState::Trial {
+                PlanTier::Trial
+            } else {
+                PlanTier::Pro
+            }
+        } else {
+            PlanTier::Free
+        },
         features: FeatureFlags::for_state(state),
-        license_key_masked: Some(mask_key(key)),
-        expires_at: payload.expires_at,
+        license_key_masked: None,
+        license_id: Some(payload.license_id.clone()),
+        permanent: payload.permanent && tier.permanent,
+        lease_until: payload.lease_until,
         verified_at: Some(now),
+        days_remaining,
+        device_limit: payload.device_limit,
+        active_devices: 0,
         source: "license-key".to_string(),
         reason,
-        days_remaining,
-        duplicate_group_limit: if matches!(state, EntitlementState::Trial | EntitlementState::ProActive) {
+        duplicate_group_limit: if state.is_paid() {
             0
         } else {
-            FREE_DUPLICATE_GROUP_LIMIT
+            config.free_duplicate_group_limit
         },
     }
 }
 
-/// Applies the offline grace period to a cached entitlement.
+/// Applies the offline policy to a cached entitlement.
 ///
-/// A cached entitlement keeps working for `OFFLINE_GRACE_DAYS` after it was last verified, then
-/// falls back to free. Scanning is unaffected either way.
+/// The policy is deliberately narrow:
+///   - an expired *lease* on a permanent licence downgrades to free and says why,
+///   - a cached entitlement whose verification is older than the grace period downgrades to free,
+///   - scanning is unaffected in every case.
 pub fn apply_offline_grace(entitlement: Entitlement, now: i64) -> Entitlement {
     let mut entitlement = entitlement;
-    if matches!(
-        entitlement.state,
-        EntitlementState::Trial | EntitlementState::ProActive
-    ) {
-        if let Some(expiry) = entitlement.expires_at {
-            if now >= expiry {
-                entitlement.state = EntitlementState::ProExpired;
-                entitlement.features = FeatureFlags::free();
-                entitlement.reason = Some("The cached licence has expired.".to_string());
-                entitlement.days_remaining = Some(0);
-                return entitlement;
-            }
-        }
-        let stale_after = entitlement
-            .verified_at
-            .unwrap_or(0)
-            .saturating_add(OFFLINE_GRACE_DAYS * 86_400_000);
-        if now > stale_after {
-            entitlement.state = EntitlementState::Free;
-            entitlement.tier = PlanTier::Free;
+    if !entitlement.state.is_paid() {
+        return entitlement;
+    }
+
+    if let Some(until) = entitlement.lease_until {
+        if now >= until {
+            entitlement.state = EntitlementState::ProExpired;
             entitlement.features = FeatureFlags::free();
             entitlement.reason = Some(
-                "The licence could not be re-verified and the offline grace period has passed."
+                "This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected."
                     .to_string(),
             );
-            entitlement.days_remaining = None;
+            entitlement.days_remaining = Some(0);
+            return entitlement;
         }
+    }
+
+    let stale_after = entitlement
+        .verified_at
+        .unwrap_or(0)
+        .saturating_add(OFFLINE_GRACE_DAYS * 86_400_000);
+    if now > stale_after {
+        entitlement.state = EntitlementState::Free;
+        entitlement.tier = PlanTier::Free;
+        entitlement.features = FeatureFlags::free();
+        entitlement.reason = Some(
+            "The licence could not be re-verified and the offline grace period has passed."
+                .to_string(),
+        );
+        entitlement.days_remaining = None;
+        entitlement.duplicate_group_limit = FREE_DUPLICATE_GROUP_LIMIT;
     }
     entitlement
 }
 
-fn verify_signature(payload: &[u8], signature: &[u8]) -> bool {
-    let key_bytes = public_key();
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) else {
-        return false;
-    };
-    let Ok(signature) = Signature::from_slice(signature) else {
-        return false;
-    };
-    verifying_key.verify(payload, &signature).is_ok()
+/// A cached entitlement that could not be parsed. Fails closed.
+pub fn from_cache(payload_json: &str) -> Entitlement {
+    serde_json::from_str::<Entitlement>(payload_json).unwrap_or_else(|_| {
+        let mut entitlement = free_entitlement();
+        entitlement.state = EntitlementState::Invalid;
+        entitlement.reason = Some(
+            "The stored licence could not be read. Re-activate to restore your purchase.".to_string(),
+        );
+        entitlement
+    })
 }
 
-/// Masks all but the last four characters.
-pub fn mask_key(key: &str) -> String {
-    let trimmed = key.trim();
-    if trimmed.len() <= 4 {
-        return "****".to_string();
-    }
-    let visible = &trimmed[trimmed.len() - 4..];
-    format!("{}{}", "*".repeat(trimmed.len().saturating_sub(4)), visible)
+/// The reason a licence key could not be used, rendered for a customer.
+pub fn describe_error(error: &LicenseError) -> String {
+    error.message()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::product::Environment;
+    use crate::licensing::payload::{encode, payload_bytes};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    const NOW: i64 = 1_700_000_100_000;
+
+    fn config() -> CommercialConfig {
+        CommercialConfig {
+            product_id: "diskwise-pro".to_string(),
+            product_name: "Diskwise Pro".to_string(),
+            license_schema_version: 1,
+            environment: Environment::Test,
+            tiers: vec![ProductTier {
+                id: "pro-lifetime".to_string(),
+                name: "Diskwise Pro".to_string(),
+                price_minor_units: 149_900,
+                currency: "INR".to_string(),
+                permanent: true,
+                update_eligibility_months: None,
+                available: true,
+            }],
+            device_limit: 3,
+            offline_lease_days: 30,
+            free_duplicate_group_limit: 25,
+            trusted_keys: vec![],
+        }
+    }
+
+    fn tier() -> ProductTier {
+        ProductTier {
+            id: "pro-lifetime".to_string(),
+            name: "Diskwise Pro".to_string(),
+            price_minor_units: 149_900,
+            currency: "INR".to_string(),
+            permanent: true,
+            update_eligibility_months: None,
+            available: true,
+        }
+    }
+
+    fn payload() -> LicensePayload {
+        LicensePayload::permanent(
+            "lic-1",
+            "diskwise-pro",
+            "pro-lifetime",
+            "k-test",
+            NOW - 1000,
+            3,
+        )
+    }
 
     #[test]
     fn the_free_entitlement_never_blocks_core_analysis() {
@@ -352,6 +374,7 @@ mod tests {
         assert!(entitlement.features.core_analysis);
         assert_eq!(entitlement.duplicate_group_limit, FREE_DUPLICATE_GROUP_LIMIT);
         assert!(!entitlement.features.scan_history);
+        assert!(!entitlement.permanent);
     }
 
     #[test]
@@ -367,91 +390,106 @@ mod tests {
     }
 
     #[test]
+    fn a_verified_permanent_payload_produces_an_active_pro_entitlement() {
+        let entitlement = entitlement_from_payload(&payload(), &tier(), &config(), NOW);
+        assert_eq!(entitlement.state, EntitlementState::ProActive);
+        assert!(entitlement.state.is_paid());
+        assert!(entitlement.permanent);
+        assert_eq!(entitlement.device_limit, 3);
+        assert_eq!(entitlement.duplicate_group_limit, 0, "unlimited for Pro");
+        assert_eq!(entitlement.license_id.as_deref(), Some("lic-1"));
+        assert!(entitlement.reason.is_none());
+    }
+
+    #[test]
+    fn a_trial_payload_produces_a_trial_entitlement() {
+        let mut payload = payload();
+        payload.tier_id = "pro-trial".to_string();
+        let entitlement = entitlement_from_payload(&payload, &tier(), &config(), NOW);
+        assert_eq!(entitlement.state, EntitlementState::Trial);
+        assert_eq!(entitlement.tier, PlanTier::Trial);
+    }
+
+    #[test]
+    fn a_lapsed_lease_on_a_permanent_licence_reports_a_reverification_problem() {
+        let mut payload = payload();
+        payload.lease_until = Some(NOW - 1);
+        let entitlement = entitlement_from_payload(&payload, &tier(), &config(), NOW);
+        assert_eq!(entitlement.state, EntitlementState::ProExpired);
+        assert!(!entitlement.state.is_paid());
+        // Ownership is still recorded, so the UI can say so.
+        assert!(entitlement.permanent);
+        assert!(entitlement.reason.unwrap().contains("purchase is not affected"));
+    }
+
+    #[test]
     fn state_and_tier_names_match_the_wire_format() {
         assert_eq!(EntitlementState::ProActive.as_str(), "pro-active");
         assert_eq!(EntitlementState::ProExpired.as_str(), "pro-expired");
+        assert_eq!(EntitlementState::Invalid.as_str(), "invalid");
         assert_eq!(EntitlementState::parse("pro-active"), EntitlementState::ProActive);
+        assert_eq!(EntitlementState::parse("nonsense"), EntitlementState::Free);
         assert_eq!(PlanTier::Pro.as_str(), "pro");
     }
 
     #[test]
-    fn an_empty_key_is_invalid_but_still_free() {
-        let entitlement = entitlement_from_license("", 0);
-        assert_eq!(entitlement.state, EntitlementState::Invalid);
-        assert!(entitlement.features.core_analysis, "scanning still works");
-        assert!(entitlement.reason.is_some());
-    }
-
-    #[test]
-    fn a_malformed_key_is_invalid() {
-        for key in ["nonsense", "aaaa.bbbb", "a.b.c", "!!!.???", "aaaa"] {
-            let entitlement = entitlement_from_license(key, 0);
-            assert_eq!(entitlement.state, EntitlementState::Invalid, "key: {key}");
-            assert!(entitlement.features.core_analysis);
-        }
-    }
-
-    #[test]
-    fn a_well_formed_but_unsigned_key_is_invalid() {
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(br#"{"tier":"pro","issuedAt":0,"expiresAt":null,"licenseId":"x"}"#);
-        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
-        let key = format!("{payload}.{signature}");
-        let entitlement = entitlement_from_license(&key, 0);
-        assert_eq!(entitlement.state, EntitlementState::Invalid);
-        assert_eq!(entitlement.reason.as_deref(), Some("Signature verification failed."));
-    }
-
-    #[test]
-    fn masking_reveals_only_the_last_four_characters() {
-        assert_eq!(mask_key("ABCD-1234-EFGH-5678"), "****************5678");
-        assert_eq!(mask_key("abcd"), "****");
-        assert_eq!(mask_key(""), "****");
-    }
-
-    #[test]
     fn the_offline_grace_period_expires_a_stale_cached_licence() {
-        let mut cached = free_entitlement();
-        cached.state = EntitlementState::ProActive;
-        cached.tier = PlanTier::Pro;
-        cached.features = FeatureFlags::pro();
+        let mut cached = entitlement_from_payload(&payload(), &tier(), &config(), NOW);
         cached.verified_at = Some(0);
-        cached.expires_at = Some(now_millis() + 86_400_000);
+        cached.lease_until = None;
 
         let fresh = apply_offline_grace(cached.clone(), 1_000);
-        assert_eq!(fresh.state, EntitlementState::ProActive);
+        assert!(fresh.state.is_paid());
 
-        let stale = apply_offline_grace(cached, now_millis() + OFFLINE_GRACE_DAYS * 86_400_000 + 1);
+        let stale = apply_offline_grace(cached, NOW + OFFLINE_GRACE_DAYS * 86_400_000 + 1);
         assert_eq!(stale.state, EntitlementState::Free);
         assert!(!stale.features.scan_history);
         assert!(stale.reason.is_some());
     }
 
     #[test]
-    fn an_expired_cached_licence_falls_back_to_free() {
-        let mut cached = free_entitlement();
-        cached.state = EntitlementState::ProActive;
-        cached.features = FeatureFlags::pro();
-        cached.verified_at = Some(now_millis());
-        cached.expires_at = Some(1_000);
-        let resolved = apply_offline_grace(cached, now_millis());
+    fn an_expired_cached_lease_falls_back_to_free() {
+        let mut cached = entitlement_from_payload(&payload(), &tier(), &config(), NOW);
+        cached.verified_at = Some(NOW);
+        cached.lease_until = Some(1_000);
+        let resolved = apply_offline_grace(cached, NOW);
         assert_eq!(resolved.state, EntitlementState::ProExpired);
         assert!(!resolved.features.scan_history);
     }
 
     #[test]
-    fn an_expiry_in_the_past_is_expired() {
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(br#"{"tier":"pro","issuedAt":0,"expiresAt":10,"licenseId":"x"}"#);
-        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
-        // The signature will not verify with the placeholder key, so this exercises the invalid path.
-        let entitlement = entitlement_from_license(&format!("{payload}.{signature}"), 1_000_000);
-        assert_eq!(entitlement.state, EntitlementState::Invalid);
+    fn a_cached_entitlement_round_trips_through_json() {
+        let entitlement = entitlement_from_payload(&payload(), &tier(), &config(), NOW);
+        let json = serde_json::to_string(&entitlement).unwrap();
+        let decoded: Entitlement = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, entitlement);
     }
 
     #[test]
-    fn days_remaining_is_never_negative() {
-        let entitlement = entitlement_from_license("", 0);
-        assert!(entitlement.days_remaining.is_none());
+    fn an_unparseable_cache_fails_closed_to_invalid() {
+        let entitlement = from_cache("{not json");
+        assert_eq!(entitlement.state, EntitlementState::Invalid);
+        assert!(entitlement.reason.is_some());
+        // Scanning still works.
+        assert!(entitlement.features.core_analysis);
+    }
+
+    #[test]
+    fn serde_uses_camel_case() {
+        let json = serde_json::to_string(&free_entitlement()).unwrap();
+        assert!(json.contains("\"licenseKeyMasked\""));
+        assert!(json.contains("\"duplicateGroupLimit\""));
+        assert!(json.contains("\"leaseUntil\""));
+        assert!(!json.contains("license_key_masked"));
+    }
+
+    #[test]
+    fn a_signed_key_can_be_encoded_and_reparsed() {
+        // Guards the encode/parse round trip the backend relies on.
+        let signing = SigningKey::from_bytes(&[3u8; 32]);
+        let payload = payload();
+        let key = encode(&payload, &signing.sign(&payload_bytes(&payload)).to_bytes());
+        let parsed = crate::licensing::payload::parse(&key).expect("parses");
+        assert_eq!(parsed.payload, payload);
     }
 }

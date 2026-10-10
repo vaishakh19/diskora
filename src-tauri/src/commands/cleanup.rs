@@ -15,13 +15,14 @@ use crate::state::AppState;
 /// Mirrors `CleanupFinding` (returned as-is).
 pub use crate::cleanup::rules::CleanupFinding as Finding;
 
-/// Builds findings for a scan from the user's rules.
+/// Builds findings for a scan from the user's rules. Free at every tier.
 #[tauri::command]
 pub fn cleanup_scan(
     scan_id: String,
     rules: Vec<CleanupRule>,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<CleanupFinding>> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::CoreAnalysis)?;
     let scans = state.scans()?;
     let entry = scans
         .get(&scan_id)
@@ -36,9 +37,10 @@ pub fn cleanup_scan(
     Ok(rules::build_findings(&index, &rules, now))
 }
 
-/// Simulates a plan. Changes nothing.
+/// Simulates a plan. Changes nothing, and is free at every tier.
 #[tauri::command]
 pub fn cleanup_preview(plan: CleanupPlan, state: State<'_, AppState>) -> AppResult<CleanupPreview> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::PreviewOnly)?;
     let prepared = prepare(&plan, &state)?;
     let context = ValidationContext {
         index: &prepared.index,
@@ -49,8 +51,32 @@ pub fn cleanup_preview(plan: CleanupPlan, state: State<'_, AppState>) -> AppResu
 }
 
 /// Executes a plan. Every path is revalidated immediately before it is touched.
+///
+/// This is the single most dangerous command in the app, so it is gated twice:
+///   1. `PaidCleanup` — the authorization layer, inside the backend, before anything is prepared.
+///   2. `PermanentDeletion` — again inside the backend, for any item that asked to bypass the
+///      Recycle Bin.
+///
+/// The check reads the entitlement the backend resolved. A modified React interface cannot make
+/// this command succeed by hiding a paywall, because it does not consult the interface at all.
 #[tauri::command]
 pub fn cleanup_execute(plan: CleanupPlan, state: State<'_, AppState>) -> AppResult<CleanupResult> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::PaidCleanup)?;
+
+    // Permanent deletion is a separate, separately-gated capability.
+    if plan.items.iter().any(|item| item.action == "permanent") {
+        crate::authz::authorize_state(
+            &state,
+            crate::authz::Permission::PermanentDeletion,
+        )?;
+    }
+
+    // A plan that touches many paths at once is a bulk operation, which is its own capability.
+    let total_paths: usize = plan.items.iter().map(|item| item.paths.len()).sum();
+    if total_paths > 50 {
+        crate::authz::authorize_state(&state, crate::authz::Permission::BulkFileOperations)?;
+    }
+
     let prepared = prepare(&plan, &state)?;
     let context = ValidationContext {
         index: &prepared.index,

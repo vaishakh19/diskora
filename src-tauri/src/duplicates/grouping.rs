@@ -84,6 +84,39 @@ pub struct DuplicateReport {
     pub errors: Vec<WalkError>,
 }
 
+/// Truncates a report to the largest `limit` groups, recomputing every total exactly.
+///
+/// This is the enforcement point for the free tier's group limit. It runs in the backend, after
+/// the report is built, so no amount of interface tampering can lift it. `limit` of `None` leaves
+/// the report untouched.
+///
+/// The recomputation is exact rather than a running delta, because the UI must never show a size
+/// the backend cannot account for.
+pub fn limit_groups(report: DuplicateReport, limit: Option<usize>) -> DuplicateReport {
+    let Some(limit) = limit else {
+        return report;
+    };
+    if report.groups.len() <= limit {
+        return report;
+    }
+
+    // Groups are already ordered largest reclaimable first; re-sorting after truncation is cheap
+    // and guarantees the ordering the UI relies on.
+    let mut kept: Vec<DuplicateGroup> = report.groups.into_iter().take(limit).collect();
+    kept.sort_by(|a, b| b.reclaimable_bytes.cmp(&a.reclaimable_bytes));
+
+    let total_copies: usize = kept.iter().map(|group| group.copies.len()).sum();
+    let total_reclaimable_bytes: u64 = kept.iter().map(|group| group.reclaimable_bytes).sum();
+
+    DuplicateReport {
+        groups: kept,
+        total_groups: limit,
+        total_copies,
+        total_reclaimable_bytes,
+        ..report
+    }
+}
+
 /// Stage 1: bucket files by exact size. Cheap, and removes almost everything.
 pub fn group_by_size<'a>(
     files: &'a [FileRecord],
@@ -277,6 +310,103 @@ pub fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn group(id: &str, size: u64, copies: usize) -> DuplicateGroup {
+        DuplicateGroup {
+            group_id: id.to_string(),
+            size_bytes: size,
+            reclaimable_bytes: size * (copies.saturating_sub(1) as u64),
+            copies: (0..copies)
+                .map(|index| DuplicateFile {
+                    path: format!("C:\\{id}-{index}.bin"),
+                    name: format!("{id}-{index}.bin"),
+                    size_bytes: size,
+                    modified_at: None,
+                    byte_verified: false,
+                    is_suggested_original: index == 0,
+                })
+                .collect(),
+            hash: "h".to_string(),
+            confidence: "hash".to_string(),
+        }
+    }
+
+    fn report_of(count: usize) -> DuplicateReport {
+        let groups: Vec<DuplicateGroup> = (0..count)
+            .map(|index| group(&format!("g{index}"), 10_000 * (index as u64 + 1), 2))
+            .collect();
+        let total_copies: usize = groups.iter().map(|group| group.copies.len()).sum();
+        let total_reclaimable_bytes: u64 = groups.iter().map(|group| group.reclaimable_bytes).sum();
+        DuplicateReport {
+            report_id: "r".to_string(),
+            scan_id: "s".to_string(),
+            started_at: 0,
+            finished_at: Some(1),
+            status: "complete".to_string(),
+            algorithm: "sha256".to_string(),
+            total_groups: groups.len(),
+            total_copies,
+            total_reclaimable_bytes,
+            hashed_bytes: 0,
+            files_hashed: 0,
+            groups,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_report_within_the_limit_is_untouched() {
+        let report = report_of(3);
+        let before = report.total_reclaimable_bytes;
+        let limited = limit_groups(report, Some(5));
+        assert_eq!(limited.groups.len(), 3);
+        assert_eq!(limited.total_reclaimable_bytes, before);
+    }
+
+    #[test]
+    fn a_report_over_the_limit_keeps_the_largest_groups() {
+        let report = report_of(5);
+        // Each group reclaims `size` (two copies, one kept), so the three largest are 50k + 40k + 30k.
+        let limited = limit_groups(report, Some(3));
+        assert_eq!(limited.groups.len(), 3);
+        assert_eq!(limited.total_groups, 3);
+        assert_eq!(limited.total_reclaimable_bytes, 120_000);
+        assert_eq!(limited.total_copies, 6);
+        assert_eq!(limited.groups[0].size_bytes, 50_000);
+        assert_eq!(limited.groups[2].size_bytes, 30_000);
+    }
+
+    #[test]
+    fn no_limit_means_everything_is_kept() {
+        let report = report_of(5);
+        let limited = limit_groups(report, None);
+        assert_eq!(limited.groups.len(), 5);
+        assert_eq!(limited.total_reclaimable_bytes, 150_000);
+    }
+
+    #[test]
+    fn the_totals_stay_arithmetically_exact() {
+        let report = report_of(10);
+        let limited = limit_groups(report, Some(4));
+        let sum: u64 = limited.groups.iter().map(|group| group.reclaimable_bytes).sum();
+        assert_eq!(sum, limited.total_reclaimable_bytes);
+        let copies: usize = limited.groups.iter().map(|group| group.copies.len()).sum();
+        assert_eq!(copies, limited.total_copies);
+    }
+
+    #[test]
+    fn truncation_never_leaves_zero_copies() {
+        let report = report_of(6);
+        let limited = limit_groups(report, Some(2));
+        for kept in &limited.groups {
+            assert_eq!(kept.copies.len(), 2, "one original plus one reclaimable copy");
+        }
+    }
 }
 
 #[cfg(test)]

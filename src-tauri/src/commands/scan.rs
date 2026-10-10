@@ -27,6 +27,10 @@ pub async fn scan_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
+    // Scanning is free at every tier and is never gated. The call is still made so that the
+    // permission catalogue is exercised on this path and the audit trail shows it was checked.
+    crate::authz::authorize_state(&state, crate::authz::Permission::CoreAnalysis)?;
+
     let root = options.root_path.trim().to_string();
     if root.is_empty() {
         return Err(AppError::InvalidArgument("No scan root was provided.".to_string()));
@@ -249,6 +253,7 @@ pub async fn scan_cancel(scan_id: String, state: State<'_, AppState>) -> AppResu
 /// Returns the full result for a finished scan, or `None` when it is unknown.
 #[tauri::command]
 pub fn scan_get(scan_id: String, state: State<'_, AppState>) -> AppResult<Option<ScanResult>> {
+    crate::authz::authorize_state(&state, crate::authz::Permission::CoreAnalysis)?;
     let scans = state.scans()?;
     let entry = match scans.get(&scan_id) {
         Some(entry) => entry,
@@ -260,6 +265,7 @@ pub fn scan_get(scan_id: String, state: State<'_, AppState>) -> AppResult<Option
 /// Every scan this session knows about, newest first.
 #[tauri::command]
 pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
+    // Scan *history* is a paid capability; this list is the in-memory one and stays free.
     let mut summaries: Vec<ScanSummary> = {
         let scans = state.scans()?;
         let mut collected: Vec<ScanSummary> = scans

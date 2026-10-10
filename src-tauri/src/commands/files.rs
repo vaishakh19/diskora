@@ -147,7 +147,7 @@ pub fn open_path(path: String) -> AppResult<()> {
 }
 
 /// Rejects anything that is not a plausible absolute filesystem path.
-fn validate_path(path: &str) -> AppResult<()> {
+pub(crate) fn validate_path(path: &str) -> AppResult<()> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err(AppError::InvalidArgument("No path was provided.".to_string()));

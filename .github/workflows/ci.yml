@@ -356,12 +356,33 @@ jobs:
           # The scan covers the code that ships and the backend, and deliberately excludes `.github/`
           # (which contains these very patterns) and the Markdown docs (which describe them). A real
           # secret in either of those would still be caught by the provider's own secret scanning.
-          if git grep -Iln -e 'whsec_[A-Za-z0-9]\{16,\}' \
-                            -e 'sk_live_[A-Za-z0-9]\{16,\}' \
-                            -e 'BEGIN PRIVATE KEY' \
-                            -e 'eyJhbGciOiJFZERTQSJ9' \
-                            -- src src-tauri supabase scripts '*.json' '*.toml' ; then
-            echo "::error::A credential-shaped string is committed. Rotate it and purge the history."
+          PATHS="src src-tauri supabase scripts *.json *.toml"
+          fail=0
+
+          # Provider secrets and the Standard Webhooks prefix.
+          if git grep -Iln -e 'whsec_[A-Za-z0-9]\{16,\}' -e 'sk_live_[A-Za-z0-9]\{16,\}' \
+                            -e 'eyJhbGciOiJFZERTQSJ9' -- $PATHS ; then
+            echo "::error::A provider secret or webhook secret is committed. Rotate it and purge the history."
+            fail=1
+          fi
+
+          # A PEM private key, detected by its base64 body rather than its header.
+          #
+          # Matching the bare header string does not work: `supabase/functions/_shared/licence.ts`
+          # legitimately contains `-----BEGIN PRIVATE KEY-----` as the wrapper it builds around a
+          # runtime key, and a header-only pattern flagged that file on every commit, which is how
+          # the `audit` job went red without a secret being involved. Requiring the body is what
+          # separates real key material from code that mentions the format.
+          #
+          # The trade-off, stated plainly: this also flags any standalone base64 blob of 40+
+          # characters, including an innocuous one. That is the intended bias — a human looks, and
+          # the alternative is a scan that cries wolf and gets ignored.
+          if git grep -Iln -E '^[A-Za-z0-9+/]{40,}={0,2}$' -- $PATHS ; then
+            echo "::error::A standalone base64 block is committed, which is what a PEM key body looks like. Inspect it; if it is key material, rotate it and purge the history."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
             exit 1
           fi
           echo "No credential-shaped strings in tracked code."

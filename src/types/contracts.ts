@@ -483,19 +483,37 @@ export interface FeatureFlags {
 export interface Entitlement {
   state: EntitlementState;
   tier: PlanTier;
-  /** Features unlocked for this entitlement. Derived, never sent by the client. */
+  /** Features unlocked for this entitlement. Derived by the backend, never sent by the client. */
   features: FeatureFlags;
   licenseKeyMasked: string | null;
-  /** ISO-8601 expiry, `null` for perpetual / free. */
-  expiresAt: number | null;
+  /**
+   * `true` for a one-time purchase: the entitlement itself never expires. A customer who paid once
+   * keeps the paid features for the life of the product.
+   */
+  permanent: boolean;
+  /**
+   * When the offline validation lease ends (ms), or `null` when the lease is perpetual.
+   *
+   * This is **not** the entitlement expiry. It is how long a previously verified licence keeps
+   * working with no re-validation, which is what lets a refunded or chargebacked licence be
+   * withdrawn without an internet connection. A lapsed lease on a permanent licence means
+   * "re-verify when you can", never "you no longer own this".
+   */
+  leaseUntil: number | null;
+  /** The licence identifier, when a licence is active. Never an email address. */
+  licenseId: string | null;
   /** When the entitlement was last verified locally (ms). */
   verifiedAt: number | null;
   /** How the current entitlement was established. */
   source: 'default' | 'license-key' | 'trial' | 'cache' | 'revocation';
   /** Human-readable reason for the current state, e.g. `Signature verification failed`. */
   reason: string | null;
-  /** Days remaining, `null` when not applicable. */
+  /** Days remaining on the offline lease, `null` for a perpetual lease or the free tier. */
   daysRemaining: number | null;
+  /** How many devices this licence may be active on at once. */
+  deviceLimit: number;
+  /** How many devices are currently active. */
+  activeDevices: number;
   /** Free-tier duplicate scan limit in groups. `0` = unlimited. */
   duplicateGroupLimit: number;
 }

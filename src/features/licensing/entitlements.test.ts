@@ -44,7 +44,9 @@ describe('freeEntitlement', () => {
     expect(entitlement.state).toBe('free');
     expect(entitlement.tier).toBe('free');
     expect(entitlement.source).toBe('default');
-    expect(entitlement.expiresAt).toBeNull();
+    expect(entitlement.leaseUntil).toBeNull();
+    expect(entitlement.permanent).toBe(false);
+    expect(entitlement.licenseId).toBeNull();
     expect(entitlement.duplicateGroupLimit).toBe(FREE_DUPLICATE_GROUP_LIMIT);
     expect(FREE_DUPLICATE_GROUP_LIMIT).toBeGreaterThan(0);
   });
@@ -66,26 +68,30 @@ describe('daysRemaining', () => {
 });
 
 describe('entitlementFromVerifiedLicense', () => {
-  it('activates a perpetual license', () => {
-    const entitlement = entitlementFromVerifiedLicense({ plan: 'pro', expiresAt: null, licenseId: 'x' }, NOW);
+  it('activates a perpetual licence', () => {
+    const entitlement = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: null, licenseId: 'x' },
+      NOW,
+    );
     expect(entitlement.state).toBe('pro-active');
     expect(entitlement.tier).toBe('pro');
-    expect(entitlement.expiresAt).toBeNull();
+    expect(entitlement.leaseUntil).toBeNull();
+    expect(entitlement.permanent).toBe(true);
     expect(entitlement.duplicateGroupLimit).toBe(0);
   });
 
-  it('activates a future-dated license', () => {
+  it('activates a licence inside its offline lease', () => {
     const entitlement = entitlementFromVerifiedLicense(
-      { plan: 'pro', expiresAt: NOW + 30 * 86_400_000, licenseId: 'x' },
+      { plan: 'pro', permanent: true, leaseUntil: NOW + 30 * 86_400_000, licenseId: 'x' },
       NOW,
     );
     expect(entitlement.state).toBe('pro-active');
     expect(entitlement.daysRemaining).toBe(30);
   });
 
-  it('marks an expired license as pro-expired and drops the tier', () => {
+  it('marks a lapsed lease on a non-permanent licence as pro-expired and drops the tier', () => {
     const entitlement = entitlementFromVerifiedLicense(
-      { plan: 'pro', expiresAt: NOW - 1, licenseId: 'x' },
+      { plan: 'pro', permanent: false, leaseUntil: NOW - 1, licenseId: 'x' },
       NOW,
     );
     expect(entitlement.state).toBe('pro-expired');
@@ -93,24 +99,47 @@ describe('entitlementFromVerifiedLicense', () => {
     expect(entitlement.features.advancedDuplicates).toBe(false);
   });
 
+  it('a lapsed lease on a PERMANENT licence is not an expiry', () => {
+    // The whole commercial model rests on this: the purchase is for life, and only the
+    // re-validation window is time-limited.
+    const entitlement = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: NOW - 1, licenseId: 'x' },
+      NOW,
+    );
+    expect(entitlement.state).toBe('pro-active');
+    expect(entitlement.tier).toBe('pro');
+    expect(entitlement.permanent).toBe(true);
+  });
+
   it('treats a trial plan as a trial', () => {
     const entitlement = entitlementFromVerifiedLicense(
-      { plan: 'trial', expiresAt: NOW + 14 * 86_400_000, licenseId: 'x' },
+      { plan: 'trial', permanent: false, leaseUntil: NOW + 14 * 86_400_000, licenseId: 'x' },
       NOW,
     );
     expect(entitlement.state).toBe('trial');
     expect(entitlement.tier).toBe('trial');
   });
+
+  it('carries the licence id and the device limit from the verified payload', () => {
+    const entitlement = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: null, licenseId: 'lic-1', deviceLimit: 3, activeDevices: 2 },
+      NOW,
+    );
+    expect(entitlement.licenseId).toBe('lic-1');
+    expect(entitlement.deviceLimit).toBe(3);
+    expect(entitlement.activeDevices).toBe(2);
+  });
 });
 
 describe('applyOfflineGrace', () => {
+  // A non-permanent licence whose lease runs out in ten days.
   const active: Entitlement = entitlementFromVerifiedLicense(
-    { plan: 'pro', expiresAt: NOW + 10 * 86_400_000, licenseId: 'x' },
+    { plan: 'pro', permanent: false, leaseUntil: NOW + 10 * 86_400_000, licenseId: 'x' },
     NOW,
   );
 
   it('keeps Pro working inside the grace window', () => {
-    const later = NOW + 12 * 86_400_000; // 2 days past expiry
+    const later = NOW + 12 * 86_400_000; // 2 days past the lease
     expect(applyOfflineGrace(active, later).state).toBe('pro-active');
   });
 
@@ -121,9 +150,21 @@ describe('applyOfflineGrace', () => {
     expect(result.tier).toBe('free');
   });
 
-  it('never expires a perpetual license', () => {
-    const perpetual = entitlementFromVerifiedLicense({ plan: 'pro', expiresAt: null, licenseId: 'x' }, NOW);
+  it('never expires a perpetual licence', () => {
+    const perpetual = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: null, licenseId: 'x' },
+      NOW,
+    );
     expect(applyOfflineGrace(perpetual, NOW + 10_000 * 86_400_000).state).toBe('pro-active');
+  });
+
+  it('never expires a permanent licence whose lease has lapsed', () => {
+    // The lease is a re-validation window, not ownership. A permanent licence stays paid.
+    const permanentLapsed = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: NOW - 1, licenseId: 'x' },
+      NOW,
+    );
+    expect(applyOfflineGrace(permanentLapsed, NOW + 10_000 * 86_400_000).state).toBe('pro-active');
   });
 
   it('leaves non-Pro entitlements alone', () => {
@@ -152,7 +193,10 @@ describe('transitions', () => {
 
 describe('checkFeature', () => {
   it('allows everything on an active Pro entitlement', () => {
-    const entitlement = entitlementFromVerifiedLicense({ plan: 'pro', expiresAt: null, licenseId: 'x' }, NOW);
+    const entitlement = entitlementFromVerifiedLicense(
+      { plan: 'pro', permanent: true, leaseUntil: null, licenseId: 'x' },
+      NOW,
+    );
     for (const feature of ['coreAnalysis', 'advancedDuplicates', 'exportReports'] as const) {
       expect(checkFeature(entitlement, feature).allowed).toBe(true);
     }

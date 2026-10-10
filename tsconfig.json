@@ -25,5 +25,11 @@
     }
   },
   "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"],
-  "exclude": ["node_modules", "dist", "src-tauri"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src-tauri",
+    "supabase",
+    "scripts"
+  ]
 }

@@ -59,11 +59,15 @@ export function freeEntitlement(now = Date.now()): Entitlement {
     tier: 'free',
     features: featuresFor('free'),
     licenseKeyMasked: null,
-    expiresAt: null,
+    permanent: false,
+    leaseUntil: null,
+    licenseId: null,
     verifiedAt: now,
     source: 'default',
     reason: null,
     daysRemaining: null,
+    deviceLimit: 1,
+    activeDevices: 0,
     duplicateGroupLimit: FREE_DUPLICATE_GROUP_LIMIT,
   };
 }
@@ -79,7 +83,7 @@ export function entitlementHeadline(entitlement: Entitlement): string {
     case 'pro-active':
       return 'Pro is active. Thank you for supporting Diskwise.';
     case 'pro-expired':
-      return 'Pro expired. Diskwise continues on the free tier; scanning was never gated.';
+      return 'Pro needs re-verifying. Diskwise continues on the free tier; scanning was never gated.';
     case 'invalid':
     default:
       return 'No valid licence. Scanning continues on the free tier.';
@@ -97,9 +101,15 @@ export function maskLicenseKey(key: string): string {
   return `${trimmed.slice(0, 6)}${'*'.repeat(Math.max(4, trimmed.length - 10))}${trimmed.slice(-4)}`;
 }
 
-export function daysRemaining(expiresAt: number | null, now = Date.now()): number | null {
-  if (expiresAt === null) return null;
-  const ms = expiresAt - now;
+/**
+ * Days left on the offline validation lease.
+ *
+ * `null` means the lease is perpetual, which is the normal case for a one-time purchase. This is
+ * deliberately *not* a countdown to losing the product.
+ */
+export function daysRemaining(leaseUntil: number | null, now = Date.now()): number | null {
+  if (leaseUntil === null) return null;
+  const ms = leaseUntil - now;
   if (ms <= 0) return 0;
   return Math.ceil(ms / DAY_MS);
 }
@@ -111,16 +121,27 @@ export function daysRemaining(expiresAt: number | null, now = Date.now()): numbe
  */
 export interface VerifiedLicensePayload {
   plan: PlanTier;
-  /** Epoch ms, or `null` for a perpetual license. */
-  expiresAt: number | null;
+  /**
+   * `true` for a one-time purchase. A permanent licence never expires, whatever the lease says.
+   */
+  permanent: boolean;
+  /** Epoch ms at which the offline validation lease ends, or `null` for a perpetual lease. */
+  leaseUntil: number | null;
   licenseId: string;
+  /** How many devices the licence may be active on at once. */
+  deviceLimit?: number;
+  /** How many devices are currently active. */
+  activeDevices?: number;
 }
 
 export function entitlementFromVerifiedLicense(
   payload: VerifiedLicensePayload,
   now = Date.now(),
 ): Entitlement {
-  const expired = payload.expiresAt !== null && payload.expiresAt <= now;
+  // A lapsed *lease* on a permanent licence is a re-verification problem, not a loss of ownership.
+  // A lapsed lease on a non-permanent licence is a real expiry.
+  const leaseLapsed = payload.leaseUntil !== null && payload.leaseUntil <= now;
+  const expired = leaseLapsed && !payload.permanent;
   const state: EntitlementState = expired
     ? 'pro-expired'
     : payload.plan === 'trial'
@@ -131,11 +152,17 @@ export function entitlementFromVerifiedLicense(
     tier: expired ? 'free' : payload.plan,
     features: featuresFor(state),
     licenseKeyMasked: null,
-    expiresAt: payload.expiresAt,
+    permanent: payload.permanent,
+    leaseUntil: payload.leaseUntil,
+    licenseId: payload.licenseId,
     verifiedAt: now,
     source: 'license-key',
-    reason: expired ? 'License expired' : null,
-    daysRemaining: daysRemaining(payload.expiresAt, now),
+    reason: expired
+      ? 'This licence needs to be re-verified. Connect to the internet and re-activate; your purchase is not affected.'
+      : null,
+    daysRemaining: daysRemaining(payload.leaseUntil, now),
+    deviceLimit: payload.deviceLimit ?? 1,
+    activeDevices: payload.activeDevices ?? 0,
     duplicateGroupLimit: 0,
   };
 }
@@ -151,8 +178,11 @@ export function applyOfflineGrace(
   graceDays = 7,
 ): Entitlement {
   if (entitlement.state !== 'pro-active' && entitlement.state !== 'trial') return entitlement;
-  if (entitlement.expiresAt === null) return entitlement;
-  const graceUntil = entitlement.expiresAt + graceDays * DAY_MS;
+  // A perpetual lease never lapses, so a permanent licence is never degraded by being offline.
+  if (entitlement.leaseUntil === null) return entitlement;
+  // A permanent licence with a lapsed lease stays paid: only the re-validation window ran out.
+  if (entitlement.permanent) return entitlement;
+  const graceUntil = entitlement.leaseUntil + graceDays * DAY_MS;
   if (now <= graceUntil) return entitlement;
   return { ...entitlement, state: 'pro-expired', tier: 'free', features: featuresFor('pro-expired') };
 }

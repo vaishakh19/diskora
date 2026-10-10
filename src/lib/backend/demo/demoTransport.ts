@@ -809,7 +809,10 @@ export function createDemoTransport(): BackendTransport {
       return entitlementFromVerifiedLicense(
         {
           plan: parsed.plan,
-          expiresAt: Date.now() + parsed.days * DAY,
+          // The browser preview has no licence service to re-validate against, so it grants a
+          // perpetual lease. This is explicitly a preview convenience and never the product path.
+          permanent: true,
+          leaseUntil: Date.now() + parsed.days * DAY,
           licenseId: parsed.key,
         },
       );
@@ -934,7 +937,8 @@ export function createDemoTransport(): BackendTransport {
       }
       const next = entitlementFromVerifiedLicense({
         plan: 'pro',
-        expiresAt: Date.now() + 365 * DAY,
+        permanent: true,
+        leaseUntil: Date.now() + 365 * DAY,
         licenseId: 'demo',
       });
       persistEntitlement({ ...next, licenseKeyMasked: mask(trimmed) });

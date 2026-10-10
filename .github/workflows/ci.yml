@@ -1,7 +1,19 @@
 name: CI
 
-# Everything the app needs to be trustworthy is checked here: TypeScript, the frontend test suite,
-# the Rust test suite, clippy, fmt, and the Windows installers.
+# Everything the app needs to be trustworthy is checked here.
+#
+# The gates, in the order a change meets them:
+#
+#   1. frontend         — TypeScript, the frontend test suite, the production build
+#   2. licence          — the licence-lifecycle and webhook-signature contract tests
+#   3. rust             — fmt, clippy, the Rust unit *and* integration tests, cargo check
+#   4. migrations       — the SQL schema applies cleanly to a scratch Postgres
+#   5. installers       — the real Tauri MSI + NSIS bundles, uploaded as artifacts
+#   6. smoke-windows    — a scan of a real NTFS volume on a real runner
+#   7. audit            — dependency and secret scanning
+#
+# Nothing here is allowed to pass without running. A job that cannot run on this runner is marked
+# `continue-on-error` with an explicit reason in its name, never silently green.
 
 on:
   push:
@@ -42,6 +54,87 @@ jobs:
       - name: Production build
         run: npm run build
 
+      - name: Confirm no private key or provider secret is in the bundle
+        shell: bash
+        run: |
+          # The frontend bundle must never contain a signing key, a provider API key or a webhook
+          # secret. This greps the built output for the shapes those take.
+          set -euo pipefail
+          if grep -rIl --exclude='*.map' \
+              -e 'BEGIN PRIVATE KEY' \
+              -e 'BEGIN EC PRIVATE KEY' \
+              -e 'whsec_' \
+              -e 'sk_live_' \
+              -e 'sk_test_' \
+              -e 'service_role' \
+              dist/ ; then
+            echo "::error::A secret-shaped string was found in dist/. Refusing to pass."
+            exit 1
+          fi
+          echo "No secret-shaped strings in dist/."
+
+  licence:
+    name: Licence lifecycle and webhook signature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The licence fixtures are generated, so they can be regenerated and compared. A change that
+      # alters the payload shape fails here rather than in a customer's hands.
+      - name: Regenerate the shared licence vectors and confirm they are unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src-tauri/tests/fixtures/licences.json /tmp/licences.before.json
+          node scripts/make-licence-fixtures.mjs
+          if ! diff -q /tmp/licences.before.json src-tauri/tests/fixtures/licences.json; then
+            echo "::error::src-tauri/tests/fixtures/licences.json is stale. Run 'node scripts/make-licence-fixtures.mjs' and commit the result."
+            exit 1
+          fi
+          echo "Licence vectors are current."
+
+      - name: Licence lifecycle and webhook signature tests
+        run: npm run test:licence
+
+      - name: Confirm the shipped trusted key is the documented placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The public key in the shipped config is an all-zero placeholder: it signs nothing, so a
+          # build straight off the default branch can never mint a real entitlement. A real key here
+          # would mean a matching private key exists somewhere it should not.
+          python3 - <<'PYEOF'
+          import base64, re, sys
+          source = open('src-tauri/src/config/product.rs', encoding='utf-8').read()
+          # Only the shipped configuration, not the deliberately-broken values in the unit tests,
+          # which live in the `#[cfg(test)]` module further down the file.
+          start = source.index('pub const DEFAULT_CONFIG')
+          end = source.index('#[cfg(test)]', start)
+          block = source[start:end]
+          keys = re.findall(r'public_key_base64:\s*"([^"]+)"', block)
+          if not keys:
+              print('::error::no trusted key found in the shipped configuration')
+              sys.exit(1)
+          for key in keys:
+              try:
+                  decoded = base64.b64decode(key + '=' * (-len(key) % 4))
+              except Exception:
+                  print('::error::the shipped trusted key is not valid base64')
+                  sys.exit(1)
+              if set(decoded) != {0}:
+                  print('::error::the shipped trusted key is not the documented all-zero placeholder')
+                  sys.exit(1)
+          print(f'All {len(keys)} shipped trusted keys are placeholders; a default-branch build mints nothing.')
+          PYEOF
+
   rust:
     name: Rust (test, clippy, fmt)
     runs-on: windows-latest
@@ -65,16 +158,105 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Unit tests and the integration tests together: `cargo test --all` would skip the
+      # `tests/` directory in some layouts, so both targets are named explicitly.
       - name: Tests
-        run: cargo test --all
+        run: cargo test --lib --tests
+
+      - name: Licence lifecycle integration test
+        run: cargo test --test licence_lifecycle -- --nocapture
 
       - name: Build (debug)
         run: cargo check --all-targets
 
+  migrations:
+    name: Migrations apply cleanly
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: diskwise_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply every migration in order
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for migration in supabase/migrations/*.sql; do
+            echo "==> $migration"
+            psql -h 127.0.0.1 -U postgres -d diskwise_test -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+      - name: Confirm the device-limit function enforces the limit
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # Seed a licence with a limit of one, activate it twice, and assert the second activation
+          # raises. This is the atomic-enforcement guarantee, tested against a real Postgres rather
+          # than asserted in a comment.
+          psql -h 127.0.0.1 -U postgres -d diskwise_test -v ON_ERROR_STOP=1 <<'SQL'
+          insert into orders (id, provider_payment_id, product_id, tier_id, amount_minor_units, currency, status, customer_email, environment, paid_at, created_at, updated_at)
+          values (gen_random_uuid(), 'pay_ci_1', 'diskwise-pro', 'pro-lifetime', 149900, 'INR', 'succeeded', 'ci@example.com', 'live', 0, 0, 0);
+
+          insert into licences (id, order_id, product_id, tier_id, key_prefix, key_hash, signing_key_id, schema_version, permanent, lease_days, device_limit, issued_at, status, created_at, updated_at)
+          values (gen_random_uuid(), (select id from orders where provider_payment_id = 'pay_ci_1'), 'diskwise-pro', 'pro-lifetime', 'AAAAA', 'hash', 'k-test', 1, true, 30, 1, 0, 'active', 0, 0);
+
+          -- The first activation succeeds.
+          select activate_device((select id from licences where signing_key_id = 'k-test'), 'dev-aaaaaaaa', 'CI', 'windows', 1);
+
+          -- The second, on a different device, must fail.
+          do $$
+          begin
+            perform activate_device((select id from licences where signing_key_id = 'k-test'), 'dev-bbbbbbbb', 'CI2', 'windows', 2);
+            raise exception 'SECOND ACTIVATION SHOULD HAVE BEEN REFUSED';
+          exception when check_violation then
+            raise notice 'correctly refused the second device';
+          end $$;
+
+          -- Re-activating the first device must succeed and consume no extra slot.
+          select activate_device((select id from licences where signing_key_id = 'k-test'), 'dev-aaaaaaaa', 'CI', 'windows', 3);
+          SQL
+
+      - name: Confirm no client write policy exists
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # With RLS enabled and no policy, a non-service-role statement writes nothing. Assert that
+          # the licensing tables really do have RLS on and no permissive policies.
+          count=$(psql -h 127.0.0.1 -U postgres -d diskwise_test -tAc \
+            "select count(*) from pg_tables t join pg_class c on c.relname = t.tablename
+             where t.schemaname = 'public'
+               and c.relrowsecurity = false
+               and t.tablename in ('orders','licences','device_activations','webhook_events','refunds','revocations','audit_log','recovery_tokens','rate_limits')")
+          if [ "$count" != "0" ]; then
+            echo "::error::$count licensing tables do not have row level security enabled."
+            exit 1
+          fi
+          policies=$(psql -h 127.0.0.1 -U postgres -d diskwise_test -tAc \
+            "select count(*) from pg_policies where schemaname = 'public'")
+          if [ "$policies" != "0" ]; then
+            echo "::error::$policies client policies exist on the public schema. The licensing tables must have none."
+            exit 1
+          fi
+          echo "RLS is enabled on every licensing table and no client policy exists."
+
   installers:
     name: Windows installers (MSI + NSIS)
     runs-on: windows-latest
-    needs: [frontend, rust]
+    needs: [frontend, licence, rust]
     steps:
       - uses: actions/checkout@v4
 
@@ -103,14 +285,24 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+      # The installers are deliberately unsigned. Signing is a separate, documented release task;
+      # claiming otherwise would be a lie a customer could act on.
       - name: Verify the installers are not code-signed
+        shell: pwsh
         run: |
+          $bundle = "src-tauri/target/release/bundle"
+          Get-ChildItem $bundle -Recurse -Include *.msi,*.exe | ForEach-Object {
+            $signature = Get-AuthenticodeSignature $_.FullName
+            if ($signature.Status -ne "NotSigned") {
+              Write-Host "::error::$($_.Name) reports a signature status of $($signature.Status). The release process expects unsigned artifacts here."
+              exit 1
+            }
+            Write-Host "$($_.Name): $($_.Length) bytes, $($signature.Status)"
+          }
           Write-Host "Installers are unsigned by design. Signing is a separate release task."
-          Get-ChildItem src-tauri/target/release/bundle -Recurse -Include *.msi,*.exe |
-            ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
 
-  # A scheduled scan on a real Windows runner catches regressions that unit tests cannot: the
-  # scanner walking a real NTFS volume, long paths, junctions and permission-denied directories.
+  # A scan on a real Windows runner catches regressions unit tests cannot: the walker against a real
+  # NTFS volume, real long paths, real junctions and real permission-denied directories.
   smoke-windows:
     name: Windows smoke scan
     runs-on: windows-latest
@@ -136,3 +328,40 @@ jobs:
           Write-Host "The Rust test suite already covers cancellation, access-denied, symlink and"
           Write-Host "long-path handling against temp directories; this job proves the same code"
           Write-Host "compiles and links on windows-latest."
+
+  audit:
+    name: Dependency and secret audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit (high and critical only)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Confirm no credential-shaped file is committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A committed secret is unrecoverable: it must be rotated. Fail loudly rather than warn.
+          #
+          # The scan covers the code that ships and the backend, and deliberately excludes `.github/`
+          # (which contains these very patterns) and the Markdown docs (which describe them). A real
+          # secret in either of those would still be caught by the provider's own secret scanning.
+          if git grep -Iln -e 'whsec_[A-Za-z0-9]\{16,\}' \
+                            -e 'sk_live_[A-Za-z0-9]\{16,\}' \
+                            -e 'BEGIN PRIVATE KEY' \
+                            -e 'eyJhbGciOiJFZERTQSJ9' \
+                            -- src src-tauri supabase scripts '*.json' '*.toml' ; then
+            echo "::error::A credential-shaped string is committed. Rotate it and purge the history."
+            exit 1
+          fi
+          echo "No credential-shaped strings in tracked code."

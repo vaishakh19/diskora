@@ -68,7 +68,13 @@ export function LicensingView(): React.JSX.Element {
             <Row label="Source" value={entitlement.source} />
             <Row
               label="Expires"
-              value={entitlement.expiresAt === null ? 'never' : formatDateTime(entitlement.expiresAt)}
+              value={
+                entitlement.leaseUntil === null
+                  ? entitlement.permanent
+                    ? 'never'
+                    : 'not yet verified'
+                  : formatDateTime(entitlement.leaseUntil)
+              }
             />
             <Row
               label="Verified"

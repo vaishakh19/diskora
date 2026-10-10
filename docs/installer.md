@@ -15,6 +15,26 @@ Diskwise ships two installers, both configured in `src-tauri/tauri.conf.json`:
 - **MSI** — the machine-wide, Group-Policy-friendly package. Standard Add/Remove Programs entry.
 - **NSIS** — the per-user installer, smaller and faster, with the same uninstall entry.
 
+## What each installer does, and does not, do
+
+| | MSI | NSIS |
+| --- | --- | --- |
+| Scope | per-machine by default, per-user with `MSIINSTALLPERUSER=1` | per-user (`installMode: currentUser`) |
+| Elevation | yes, via the standard Windows installer prompt | **no elevation prompt** |
+| Installs to | `%PROGRAMFILES%\Diskwise` | `%LOCALAPPDATA%\Diskwise` |
+| WebView2 | `downloadBootstrapper` fetches it if absent | same |
+| Upgrade | major-upgrade, replaces the previous version in place | replaces in place |
+| Uninstall entry | Apps & features | Apps & features + `uninstall.exe` |
+
+**No unexpected elevation.** The NSIS installer never asks for administrator rights, and the app
+itself never elevates: it writes only to its own per-user data directory
+(`%APPDATA%\com.diskwise.app`). Scanning a folder the user cannot read produces an honest
+"access denied" entry in the scan results, not a UAC prompt.
+
+**The installer does not touch anything outside its own directories.** It does not modify the
+Recycle Bin, Defender, the firewall, the hosts file, or any system setting, and it does not install a
+service, a scheduled task or a browser extension.
+
 ## Prerequisites
 
 | Tool | Version | Notes |
@@ -98,6 +118,54 @@ Guidance for whoever does it:
 3. Timestamp the signature so it stays valid after the certificate expires.
 4. Record the thumbprint and the signing date in the release notes, so users can verify
    independently.
+5. Publish the SHA-256 of both installers alongside them, so a user can check what they downloaded
+   even before a signature exists.
+
+**Verifying an unsigned download yourself**, until signing is in place:
+
+```powershell
+Get-FileHash .\Diskwise_0.1.0_x64-setup.exe -Algorithm SHA256
+```
+
+Compare it to the hash in the release notes. If they differ, do not run the file.
+
+## Installer smoke test
+
+The `installers` CI job is the smoke test: it builds the real app and the real bundles, uploads them
+as artefacts, and **fails if either reports an Authenticode signature** — because the release process
+expects unsigned output and a signature appearing there would mean the release workflow was wired up
+without the corresponding documentation.
+
+What that job does not do is install and launch the app on the runner. That is a manual step,
+documented here so it is not mistaken for an automated gate:
+
+1. Download the MSI, install it, confirm the Apps & features entry appears.
+2. Download the NSIS installer, install it, confirm no UAC prompt appears.
+3. Launch the app, pick a small folder, scan it, and confirm the numbers match what File Explorer
+   reports.
+4. Uninstall through Apps & features and confirm the database survives.
+5. Reinstall and confirm the settings and the licence are still there.
+
+## Upgrade
+
+Both installers replace an existing installation in place. What survives:
+
+- **Settings** and **stored scan history** — they live in the SQLite database under
+  `%APPDATA%\com.diskwise.app`, which the installer never touches.
+- **Your licence.** The licence key is stored in that same database, and verification is offline, so
+  an upgraded build resolves the entitlement without a network call and without re-activating.
+- **In-flight scans** — these are lost, because the old process is gone. Nothing is half-written: a
+  scan is never persisted until it finishes.
+
+What does not survive, deliberately:
+
+- **Cached entitlement verification.** The upgrade re-verifies the stored key against the new build's
+  trusted keys. If the signing key was rotated, the new build refuses the old licence with a message
+  that says to update — which is exactly the revocation property a rotation is supposed to have. See
+  [`licensing.md`](licensing.md), "Key rotation and compromise recovery".
+
+To upgrade across a signing-key rotation, the customer re-activates once (or recovers through the
+account page). Nobody pays twice.
 
 ## Uninstall
 
@@ -106,10 +174,21 @@ Both installers register a standard uninstall entry:
 - MSI: Apps & features → Diskwise → Uninstall.
 - NSIS: the same entry, plus `uninstall.exe` in the install directory.
 
-Uninstalling removes the application files. It does **not** remove the local database
-(`%APPDATA%\com.diskwise.app\diskwise.sqlite3`), which holds the user's preferences and cached scan
-history. That is intentional: a reinstall should not lose settings. Deleting that file is the
-documented way to start from a clean slate.
+Uninstall removes the application files and the uninstall entry. It does **not** remove:
+
+- the local database (`%APPDATA%\com.diskwise.app\diskwise.sqlite3`), which holds preferences,
+  cached scan history and the licence key. A reinstall should not lose settings.
+- anything the Recycle Bin already holds. Diskwise moves files to the Recycle Bin rather than
+  deleting them, so a cleanup performed before an uninstall is still recoverable from there.
+- any file Diskwise ever analysed. **Analysis is read-only.** Nothing is deleted by scanning,
+  previewing, or uninstalling.
+
+Deleting `%APPDATA%\com.diskwise.app` is the documented way to start from a clean slate, and it also
+releases the local device activation record — which does **not** release the slot on the licence
+service. Deactivate the device in the app first if you want that.
+
+The uninstaller never blocks, never warns about unrelated software, and never requires you to keep
+the product. It is a standard Windows uninstall.
 
 ## High-DPI
 

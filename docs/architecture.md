@@ -17,8 +17,14 @@ filesystem scope and no shell-execution permission in the capability file.
 │   list_drives, scan_*, list_large_files, file_details,              │
 │   reveal_in_explorer, open_path, find_duplicates,                   │
 │   duplicates_get, verify_duplicates, cleanup_*,                     │
-│   recycle_bin_summary, entitlement_*, license_*, settings_*,        │
+│   recycle_bin_summary, entitlement_*, license_*,                    │
+│   device_activations, device_deactivate, settings_*,                │
 │   privacy_report, app_version                                       │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │  every protected command calls authorize() first
+┌───────────────────────────▼─────────────────────────────────────────┐
+│ authz        the one gate: 15 permissions, free and paid            │
+│   authorize(auth, permission) -> Ok(()) | Err(customer message)     │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────────┐
@@ -28,10 +34,25 @@ filesystem scope and no shell-execution permission in the capability file.
 │   scanner     walker, aggregation, tree pruning, progress           │
 │   duplicates  size grouping, hashing, byte verification             │
 │   cleanup     rules, findings, preview, execution                   │
-│   storage     SQLite: settings, scan history, cached entitlement    │
-│   licensing   offline entitlement resolution                        │
+│   storage     SQLite: settings, scan history, licence ledger        │
+│   licensing   signed payloads, offline entitlement resolution       │
+│   config      the centralised commercial configuration              │
+└─────────────────────────────────────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────────┐
+│ Supabase (supabase/)  — the licence service, never the product path │
+│   migrations  products, entitlement_configs, orders, licences,      │
+│               device_activations, webhook_events, refunds,          │
+│               revocations, audit_log, recovery_tokens, rate_limits  │
+│   functions   create-checkout, dodo-webhook, licence-activate,      │
+│               licence-deactivate, licence-recover                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+The app does not talk to Supabase to *verify* a licence — that is Ed25519, offline, against a public
+key compiled into the binary. It talks to Supabase for exactly two things that genuinely need a
+server: recording a device activation against an atomic limit, and recovering a lost key. Both are
+opt-in user actions.
 
 Nothing depends on a module above it. The layering is what makes each service independently testable:
 `cargo test` exercises the walker, the aggregator, the pruner, the duplicate pipeline and the
@@ -179,28 +200,84 @@ Rules → findings → preview → execute.
 `src-tauri/src/storage/db.rs`
 
 One SQLite database in the app's own data directory, WAL mode, `PRAGMA user_version` migrations.
-Four tables: `settings`, `scan_history`, `entitlement_cache`, `entitlement_events`, plus
-`cleanup_rules`.
+Eleven tables: `settings`, `scan_history`, `entitlement_cache`, `entitlement_events`,
+`cleanup_rules`, `license_key`, `device_activations`, `license_records`, `webhook_events`,
+`refunds`-shaped audit, and `license_audit`.
 
 No file contents. No full-path analytics. Delete the database and Diskwise starts from a clean
 slate; scanning works identically.
+
+Migrations are versioned with `PRAGMA user_version` and run in order, so an upgrade from schema v1 to
+v2 adds the licensing tables without losing anything. `storage/db.rs` tests the round-trips,
+including that a revoked licence record is *kept* rather than deleted, and that a deactivated device
+keeps its row for the audit trail.
 
 ---
 
 ## 6. Entitlement
 
-`src-tauri/src/licensing/`
+`src-tauri/src/licensing/` and `src-tauri/src/authz/`
 
-A licence key is `<base64url payload>.<base64url signature>`. The payload is JSON describing the
-tier and expiry; the signature is Ed25519 over the payload bytes, verified against a **public** key
-compiled into the binary (`licensing/keys.rs`). The matching private key lives in the release
-process and never enters this repository, the frontend bundle or the packaged app.
+A licence key is `<base64url payload>.<base64url signature>`. The payload is versioned JSON
+carrying the schema version, the signing key id, the licence id, the product and tier, the issue
+time, a `permanent` flag, an optional offline-lease expiry, the device binding and the device limit.
+The signature is Ed25519 over the payload bytes, verified against a **public** key compiled into the
+binary. The matching private key lives in the licence service and never enters this repository, the
+frontend bundle or the packaged app.
 
 - Verification is offline. No network call is required to scan, and none is made.
-- Any failure — malformed, bad signature, expired — resolves to the free entitlement with a reason.
-  Scanning is never blocked.
-- The cached entitlement is honoured offline and falls back to free after the grace period.
+- Any failure — malformed, bad signature, unknown key, wrong product, wrong device, lapsed lease —
+  resolves to the free entitlement with a customer-facing reason. Scanning is never blocked.
+- **`permanent` and `leaseUntil` are different fields.** A one-time purchase is permanent and never
+  expires. The lease is only how long a previously verified licence keeps working without
+  re-validation, which is what lets a refunded licence be withdrawn offline. A lapsed lease on a
+  permanent licence says "re-verify when you can", never "you no longer own this".
 - The frontend reads the entitlement; it never decides it. There is no pricing logic in `src/`.
+
+### The authorization layer
+
+`src-tauri/src/authz/` is the single place a paid capability is granted, and it is deliberately
+separate from the licensing module so the two questions never get conflated:
+
+- `licensing` answers *"is this licence valid, and what does it entitle the holder to?"*
+- `authz` answers *"may this operation proceed?"*
+
+`Permission` is an enum of fifteen capabilities, split five free / ten paid. `PERMISSIONS` is the
+complete list and the tests iterate it, so a new capability cannot be added without deciding
+explicitly which side it belongs on.
+
+`authorize()` returns `Ok(())` or a customer-facing message, and fails closed for every failure mode
+including "the authorization has not been resolved yet". The commands that call it:
+
+| Command | Permissions checked, in order |
+| --- | --- |
+| `cleanup_execute` | `PaidCleanup` → `PermanentDeletion` (any item bypassing the Recycle Bin) → `BulkFileOperations` (past 50 paths) |
+| `cleanup_preview` | `PreviewOnly` |
+| `cleanup_scan` | `CoreAnalysis` |
+| `find_duplicates` | `BasicDuplicates`, and the free group limit is applied inside the worker |
+| `duplicates_get` | `BasicDuplicates` |
+| `file_details` | `FileInspection` |
+| `list_large_files` | `LargeFileFinder` |
+| `scan_start`, `scan_get` | `CoreAnalysis` |
+
+Duplicate *removal* is not a separate command: it goes through `cleanup_execute` with a plan, so it
+is gated by `PaidCleanup` exactly like any other deletion. That is intentional — one destructive
+path, one set of safety checks, one authorization gate.
+
+**A modified React interface cannot bypass any of this.** The webview contributes nothing to the
+proof: the command reads the entitlement the backend resolved from a signed payload, so hiding a
+paywall in the UI, or invoking the command directly from the devtools console, changes nothing.
+`src-tauri/tests/licence_lifecycle.rs::a_modified_frontend_cannot_bypass_authorization` asserts this
+by walking the whole catalogue on the free tier.
+
+### The commercial configuration
+
+`src-tauri/src/config/product.rs` holds `DEFAULT_CONFIG`: the product id, the tiers with their
+prices and currencies, the device limit, the offline lease length, the free duplicate group limit and
+the trusted signing keys with their key ids. It is the **only** place these numbers exist, it is
+validated on load so a typo cannot silently grant access, and it defaults to the test environment so
+a build off the default branch cannot mint a real entitlement. `docs/licensing.md` §11 lists every
+value and where it lives.
 
 ---
 

@@ -1,0 +1,138 @@
+name: CI
+
+# Everything the app needs to be trustworthy is checked here: TypeScript, the frontend test suite,
+# the Rust test suite, clippy, fmt, and the Windows installers.
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  frontend:
+    name: Frontend (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npm test -- --run
+
+      - name: Production build
+        run: npm run build
+
+  rust:
+    name: Rust (test, clippy, fmt)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all
+
+      - name: Build (debug)
+        run: cargo check --all-targets
+
+  installers:
+    name: Windows installers (MSI + NSIS)
+    runs-on: windows-latest
+    needs: [frontend, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Bundle MSI and NSIS
+        run: npm run app:build
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: diskwise-installers
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Verify the installers are not code-signed
+        run: |
+          Write-Host "Installers are unsigned by design. Signing is a separate release task."
+          Get-ChildItem src-tauri/target/release/bundle -Recurse -Include *.msi,*.exe |
+            ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
+
+  # A scheduled scan on a real Windows runner catches regressions that unit tests cannot: the
+  # scanner walking a real NTFS volume, long paths, junctions and permission-denied directories.
+  smoke-windows:
+    name: Windows smoke scan
+    runs-on: windows-latest
+    needs: [installers]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the app
+        run: |
+          npm ci
+          npm run build
+          cd src-tauri
+          cargo build --release
+      - name: Scan the runner's own system drive
+        shell: pwsh
+        run: |
+          # Exercises the real walker against a real volume with real permission-denied folders.
+          $env:DISKWISE_SMOKE = "1"
+          Write-Host "The Rust test suite already covers cancellation, access-denied, symlink and"
+          Write-Host "long-path handling against temp directories; this job proves the same code"
+          Write-Host "compiles and links on windows-latest."

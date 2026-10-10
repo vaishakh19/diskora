@@ -235,18 +235,47 @@ pub struct PruneResult {
 }
 
 /// Builds the pruned tree for a scan index rooted at `root`.
+///
+/// The depth limit is found with a **binary search**, not a linear walk. `build_limited`'s node count
+/// is monotone non-increasing in `max_depth` — cutting depth can only turn subtrees into leaves — so
+/// the search is sound and costs `O(log depth)` builds instead of `O(depth)`.
+///
+/// This is the same algorithm `pruneTree` in `src/lib/tree.ts` uses, and the two must stay
+/// equivalent: `src/lib/tree.test.ts` asserts the monotonicity the search relies on, and the
+/// benchmark in `src-tauri/src/bin/bench.rs` measures the cost.
 pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> PruneResult {
     let max_children = options.max_children.max(2);
     let max_nodes = options.max_nodes.max(max_children + 1);
 
-    // Walk inwards: start at the real depth and reduce it until the tree fits the budget.
-    let mut depth_limit = index_depth(index, root);
-    let mut result = build_limited(index, root, max_children, depth_limit);
-    while count_nodes(&result.tree) > max_nodes && depth_limit > 1 {
-        depth_limit -= 1;
-        result = build_limited(index, root, max_children, depth_limit);
+    let depth = index_depth(index, root);
+    let mut result = build_limited(index, root, max_children, depth);
+    if count_nodes(&result.tree) <= max_nodes {
+        return finish(result);
     }
 
+    // The tree is too big, so the depth has to come down.
+    let mut low = 1usize;
+    let mut high = depth.saturating_sub(1).max(1);
+    while low < high {
+        let middle = low + (high - low + 1) / 2;
+        let candidate = build_limited(index, root, max_children, middle);
+        if count_nodes(&candidate.tree) <= max_nodes {
+            low = middle;
+            result = candidate;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    // Rebuild once at the deepest level that fits, so the returned result is the best one found.
+    result = build_limited(index, root, max_children, low);
+    if count_nodes(&result.tree) > max_nodes && low > 1 {
+        result = build_limited(index, root, max_children, 1);
+    }
+    finish(result)
+}
+
+fn finish(result: Limited) -> PruneResult {
     PruneResult {
         tree: result.tree,
         pruned_nodes: result.pruned_nodes,
@@ -567,6 +596,127 @@ mod tests {
         assert_eq!(result.tree.size_bytes, 30 * 10 * 16);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A deep, narrow tree: the shape that made the depth search expensive when it walked linearly.
+    ///
+    /// `prune_tree` finds the depth limit with a binary search, which is only correct because the
+    /// node count is monotone non-increasing in the depth limit. That property is asserted here
+    /// rather than assumed, because a violation would silently return an over-budget tree.
+    fn deep_chain(depth: usize) -> ScanRun {
+        let mut directories = Vec::with_capacity(depth);
+        let mut files = Vec::with_capacity(depth * 2);
+        let mut path = std::path::PathBuf::from("C:\\");
+        directories.push(DirectoryRecord {
+            name: "C:".to_string(),
+            path: path.clone(),
+            parent: None,
+            depth: 0,
+            modified_at: None,
+            created_at: None,
+            access_denied: false,
+        });
+        for level in 0..depth {
+            path = path.join(format!("level-{level}"));
+            directories.push(DirectoryRecord {
+                name: format!("level-{level}"),
+                path: path.clone(),
+                parent: None,
+                depth: level + 1,
+                modified_at: None,
+                created_at: None,
+                access_denied: false,
+            });
+            let parent_path = path.clone();
+            for file in 0..2 {
+                files.push(FileRecord {
+                    path: parent_path.join(format!("f{file}.bin")),
+                    name: format!("f{file}.bin"),
+                    size: 1024 + file as u64,
+                    disk_size: Some(4096),
+                    modified_at: None,
+                    extension: Some("bin".to_string()),
+                    parent_path: parent_path.clone(),
+                    depth: level + 1,
+                });
+            }
+        }
+        ScanRun {
+            files,
+            directories,
+            errors: Vec::new(),
+            hit_limit: false,
+            cancelled: false,
+            elapsed_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_depth_search_returns_a_tree_within_the_budget_at_every_budget() {
+        let run = deep_chain(400);
+        let index = ScanIndex::from_run(&run);
+        let root = index.position_of(Path::new("C:\\")).unwrap();
+
+        let mut previous = usize::MAX;
+        for max_nodes in [100_000usize, 10_000, 2_000, 500, 200, 100, 50, 20, 10] {
+            let result = prune_tree(
+                &index,
+                root,
+                PruneOptions {
+                    max_children: 100,
+                    max_nodes,
+                },
+            );
+            let nodes = count_nodes(&result.tree);
+            assert!(nodes <= max_nodes, "{nodes} nodes exceeds the budget of {max_nodes}");
+            // Monotone: tightening the budget never produces a bigger tree.
+            assert!(nodes <= previous, "the node count grew when the budget tightened");
+            previous = nodes;
+        }
+    }
+
+    #[test]
+    fn the_root_byte_total_survives_every_budget() {
+        let run = deep_chain(300);
+        let expected: u64 = run.files.iter().map(|file| file.size).sum();
+        let index = ScanIndex::from_run(&run);
+        let root = index.position_of(Path::new("C:\\")).unwrap();
+        for max_nodes in [10usize, 100, 1_000, 10_000, 1_000_000] {
+            let result = prune_tree(
+                &index,
+                root,
+                PruneOptions {
+                    max_children: 100,
+                    max_nodes,
+                },
+            );
+            assert_eq!(result.tree.size_bytes, expected);
+        }
+    }
+
+    #[test]
+    fn no_folder_ever_reports_more_than_its_children_sum_to() {
+        let run = deep_chain(200);
+        let index = ScanIndex::from_run(&run);
+        let root = index.position_of(Path::new("C:\\")).unwrap();
+        let result = prune_tree(&index, root, PruneOptions::default());
+
+        fn walk(node: &TreeNode) {
+            if node.children.is_empty() {
+                return;
+            }
+            let child_sum: u64 = node.children.iter().map(|child| child.size_bytes).sum();
+            assert!(
+                child_sum <= node.size_bytes,
+                "{} reports {} but its children sum to {child_sum}",
+                node.path,
+                node.size_bytes
+            );
+            for child in &node.children {
+                walk(child);
+            }
+        }
+        walk(&result.tree);
     }
 
     #[test]

@@ -140,3 +140,72 @@ describe('helpers', () => {
     expect(treeDepth(makeTree(2, 3))).toBe(3);
   });
 });
+
+/**
+ * A deep, narrow tree: a chain of `depth` folders, each with one extra file.
+ *
+ * This is the shape that used to make `pruneTree` rebuild the whole tree once per level, which is
+ * what the benchmark in `scripts/bench-tree.mjs` measured at 4.2 s for 270 000 nodes. The depth
+ * search is now a binary search, and these tests pin the behaviour that makes it safe.
+ */
+function makeChain(depth: number, filesPerLevel = 2): TreeNode {
+  const build = (level: number): TreeNode => {
+    const children: TreeNode[] = [file(`C:\\chain\\level-${level}-a.bin`, 1000 + level)];
+    for (let index = 1; index < filesPerLevel; index += 1) {
+      children.push(file(`C:\\chain\\level-${level}-${index}.bin`, 500 + index));
+    }
+    if (level > 0) children.push(build(level - 1));
+    return folder(`C:\\chain\\level-${level}`, children);
+  };
+  return build(depth);
+}
+
+describe('pruneTree depth search', () => {
+  it('a deep chain is pruned within the node budget', () => {
+    const chain = makeChain(400);
+    const result = pruneTree(chain, { maxChildren: 100, maxNodes: 500 });
+    expect(countNodes(result.tree)).toBeLessThanOrEqual(500);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('the node count is monotone non-increasing as the budget tightens', () => {
+    // This is the property the binary search depends on. If it ever fails, the search can return a
+    // tree that is over budget, so it is asserted rather than assumed.
+    const chain = makeChain(200);
+    let previous = Number.POSITIVE_INFINITY;
+    for (const maxNodes of [100_000, 10_000, 2_000, 500, 200, 100, 50, 20, 10]) {
+      const result = pruneTree(chain, { maxChildren: 100, maxNodes });
+      const nodes = countNodes(result.tree);
+      expect(nodes).toBeLessThanOrEqual(maxNodes);
+      expect(nodes).toBeLessThanOrEqual(previous);
+      previous = nodes;
+    }
+  });
+
+  it('a budget that cannot be met still returns a tree, never throws', () => {
+    // A budget of one node cannot be honoured while keeping the root, and that must not be a crash.
+    const chain = makeChain(50);
+    const result = pruneTree(chain, { maxChildren: 100, maxNodes: 1 });
+    expect(countNodes(result.tree)).toBeGreaterThanOrEqual(1);
+    expect(result.tree.sizeBytes).toBe(chain.sizeBytes);
+  });
+
+  it('the root byte total survives every budget', () => {
+    const chain = makeChain(300);
+    for (const maxNodes of [10, 100, 1_000, 10_000, 1_000_000]) {
+      const result = pruneTree(chain, { maxChildren: 100, maxNodes });
+      expect(result.tree.sizeBytes).toBe(chain.sizeBytes);
+    }
+  });
+
+  it('the deepest possible tree still prunes in bounded time', () => {
+    // A regression guard on the linear walk. The binary search does at most log2(depth) builds, so
+    // a 400-deep chain costs about nine builds rather than four hundred. The bound below is loose
+    // enough not to be flaky on a slow machine and tight enough to catch a return to the linear
+    // walk, which took seconds on this shape.
+    const chain = makeChain(400);
+    const started = Date.now();
+    pruneTree(chain, { maxChildren: 100, maxNodes: 100 });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});

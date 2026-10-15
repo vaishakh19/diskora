@@ -202,9 +202,10 @@ artifact rather than restating them in a document.
 
 Be precise: the [16 October CI run](https://github.com/vaishakh19/diskora/actions/runs/38791605145)
 passed frontend, licence contract, dependency scan and **initial PostgreSQL migrations**, and
-`cargo fmt --check` passed on Windows. **Clippy failed** before the native tests/build; installer
-and Windows link jobs were skipped. The new webhook migration `0004` and retry assertions have
-only run in PGlite with a `pgcrypto` substitution; they await the next real-Postgres CI run.
+`cargo fmt --check` passed on Windows. **Clippy failed** before native tests/build; installers and
+Windows link jobs were skipped. The follow-up [CI run 38793800761](https://github.com/vaishakh19/diskora/actions/runs/38793800761)
+also passed all migrations including webhook retry migration `0004` and its assertions against
+real PostgreSQL 17. Its Windows Rust job must still be inspected separately.
 
 - No local Cargo toolchain is available. No successful native compilation, Rust scanner/cleanup
   test, Clippy check, installer build, install/uninstall or real NTFS scan has been verified.

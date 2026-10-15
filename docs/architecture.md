@@ -1,5 +1,9 @@
 # Architecture
 
+> This describes the intended source-level boundaries. The Windows Rust tests and build have
+> **not** passed; see [the release audit](release-audit.md). The browser demo is synthetic and
+> never performs destructive operations.
+
 Diskwise is three layers with a hard boundary between the UI and the filesystem. The webview can
 only reach the filesystem through the command surface in `src-tauri/src/commands/`; there is no
 filesystem scope and no shell-execution permission in the capability file.
@@ -188,9 +192,13 @@ Rules → findings → preview → execute.
   - is it a link? refuse — never delete through a link,
   - is it a synthetic `Other` node? refuse,
   - does it still exist? if not, report `missing`,
-  - has it changed size since the scan? if so, report `changed` and skip it,
-  - otherwise act: Recycle Bin by default (`trash::delete`), permanent deletion only when the caller
-    explicitly asks for it.
+  - does it match an exact scanned file with unchanged size and modification time? if not, skip,
+  - does it have an unconsumed, explicitly confirmed preview ticket for these exact paths? if not,
+    refuse at the Tauri command boundary,
+  - otherwise act: an authorized Recycle Bin move (`trash::delete`) of individual files only.
+    Permanent deletion is **disabled**, even for paid users, until NTFS handle-level safety is
+    demonstrated on Windows. A path can still change between validation and action: do not call
+    this a verified safety guarantee before native race tests.
 - Failures and partial completion are reported path by path. Nothing is swallowed.
 
 ---

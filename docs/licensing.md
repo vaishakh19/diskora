@@ -278,8 +278,9 @@ The handler verifies the signature, then uses `claim_webhook_v2` in migration `0
    repeat intermediate writes, so each paid mutation still needs its own idempotency key.
 
 The old boolean claim functions remain present for a staged deployment but must not be called by
-new code. These SQL semantics have been exercised in PGlite and are checked in the PostgreSQL CI
-workflow; **no Dodo delivery has been executed against a deployed Edge Function**.
+new code. These SQL semantics passed PGlite locally and the real PostgreSQL 17 CI job in
+[run 38793800761](https://github.com/vaishakh19/diskora/actions/runs/38793800761); **no Dodo
+delivery has been executed against a deployed Edge Function**.
 
 ### Test mode cannot grant a production entitlement
 
@@ -504,7 +505,7 @@ app, patching the binary, or reverse engineering it, and it is not represented a
 | Webhook replay with a stale timestamp refused | same | local + CI |
 | Webhook replay with an edited body refused | same | local + CI |
 | `whsec_` prefix handling | same | local + CI |
-| Claim retry, changed-body refusal and stale-worker lease | `claim_webhook_v2` / `finish_webhook_v2`; CI `migrations` job | PGlite locally; real Postgres pending |
+| Claim retry, changed-body refusal and stale-worker lease | `claim_webhook_v2` / `finish_webhook_v2`; CI `migrations` job | PGlite locally + real PostgreSQL CI passed |
 | Device limit enforced atomically | CI `migrations` job against a real Postgres | CI |
 | No client write policy exists | CI `migrations` job | CI |
 | RLS enabled on every licensing table | CI `migrations` job | CI |
@@ -516,9 +517,9 @@ app, patching the binary, or reverse engineering it, and it is not represented a
 
 **What has not been run.** There is no local Rust toolchain. In the 16 October CI run,
 Windows `cargo fmt --check` passed, Clippy failed and native tests/build/installers were skipped.
-Initial migrations passed against CI's real Postgres; migration `0004` has only run in PGlite with
-a `pgcrypto` substitution and awaits the revised CI job. No Edge Function has been deployed to a
-live Supabase project or tested against real Dodo events. The Node contract suite verifies shared
+Migrations `0001`–`0004` and the webhook retry assertions passed against real PostgreSQL 17 in
+[CI run 38793800761](https://github.com/vaishakh19/diskora/actions/runs/38793800761); no Edge
+Function has been deployed to a live Supabase project or tested against real Dodo events. The Node contract suite verifies shared
 HMAC/signing helpers but **not** paid issuance, delivery, refund, recovery or native activation.
 
 ---

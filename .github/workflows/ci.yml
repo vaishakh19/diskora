@@ -162,10 +162,13 @@ jobs:
           # Annotate compiler diagnostics: Actions' hosted log download may be unavailable in
           # restricted environments, but check-run annotations remain accessible through the API.
           if ! cargo clippy --all-targets --message-format=short -- -D warnings >clippy.log 2>&1; then
-            grep -E '(^|: )(error|warning)(\[|:)' clippy.log | head -40 | while IFS= read -r line; do
+            # Cargo can fail before a rustc diagnostic (e.g. registry/network errors); always emit
+            # the log tail, not just lines matching a compiler-error regex. GitHub's annotation
+            # API remains usable when the hosted log download endpoint is unreachable.
+            tail -35 clippy.log | while IFS= read -r line; do
               printf '::error::%s\n' "$line"
             done
-            echo '::error::Clippy failed; see the job log for the full diagnostics.'
+            echo '::error::Clippy failed; full diagnostics are in the job log.'
             exit 1
           fi
 

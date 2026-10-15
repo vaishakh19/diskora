@@ -82,7 +82,9 @@ pub fn settings_update(
                     current.confirm_before_cleanup = value.as_bool().unwrap_or(true)
                 }
                 "preferRecycleBin" => current.prefer_recycle_bin = value.as_bool().unwrap_or(true),
-                "largeUnusedDays" => current.large_unused_days = value.as_u64().unwrap_or(180) as u32,
+                "largeUnusedDays" => {
+                    current.large_unused_days = value.as_u64().unwrap_or(180) as u32
+                }
                 "cachePaths" => {
                     current.cache_paths = value
                         .as_array()
@@ -258,9 +260,7 @@ mod tests {
 }
 
 /// Bootstrap helper: reads settings without a `State` wrapper.
-pub(crate) fn settings_get_for_bootstrap(
-    state: &AppState,
-) -> Result<AppSettings, AppError> {
+pub(crate) fn settings_get_for_bootstrap(state: &AppState) -> Result<AppSettings, AppError> {
     let stored = {
         let guard = state
             .database

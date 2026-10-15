@@ -22,6 +22,12 @@ pub enum ScanPhase {
     Error,
 }
 
+impl Default for ScanPhase {
+    fn default() -> Self {
+        Self::Preparing
+    }
+}
+
 impl ScanPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -68,6 +74,8 @@ pub struct ProgressCounters {
     pub bytes: AtomicU64,
     pub errors: AtomicUsize,
     pub cancelled: AtomicBool,
+    truncated: AtomicBool,
+    entries: AtomicU64,
     current_path: Mutex<String>,
     phase: Mutex<ScanPhase>,
 }
@@ -88,6 +96,27 @@ impl ProgressCounters {
 
     pub fn add_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Atomically reserves one entry so concurrent workers cannot overshoot a hard cap.
+    pub fn claim_entry(&self, limit: u64) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        self.entries
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < limit).then_some(count + 1)
+            })
+            .is_ok()
+    }
+
+    /// Returns true only the first time a traversal limit is reached.
+    pub fn mark_truncated(&self) -> bool {
+        !self.truncated.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        self.truncated.load(Ordering::SeqCst)
     }
 
     pub fn cancel(&self) {
@@ -134,26 +163,37 @@ impl ProgressCounters {
     }
 
     pub fn phase(&self) -> ScanPhase {
-        self.phase.lock().map(|guard| *guard).unwrap_or(ScanPhase::Preparing)
+        self.phase
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(ScanPhase::Preparing)
     }
 }
 
-/// A single progress reading.
-#[derive(Debug, Clone)]
+/// A single progress reading; the field names match `src/types/contracts.ts` exactly.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressSnapshot {
+    pub scan_id: String,
     pub phase: ScanPhase,
-    pub files: u64,
-    pub folders: u64,
-    pub bytes: u64,
+    pub status: ScanStatus,
+    pub files_scanned: u64,
+    pub folders_scanned: u64,
+    pub bytes_analyzed: u64,
     pub errors: usize,
     pub current_path: String,
     pub elapsed_ms: u64,
     pub eta_ms: Option<u64>,
     pub percent: Option<f64>,
+    pub truncated: bool,
 }
 
 /// ETA: only meaningful once more than 5% of the expected total has been seen.
-pub fn estimate(analyzed: u64, expected: Option<u64>, elapsed_ms: u64) -> (Option<f64>, Option<u64>) {
+pub fn estimate(
+    analyzed: u64,
+    expected: Option<u64>,
+    elapsed_ms: u64,
+) -> (Option<f64>, Option<u64>) {
     let expected = match expected {
         Some(value) if value > 0 => value,
         _ => return (None, None),

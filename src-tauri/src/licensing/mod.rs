@@ -16,5 +16,5 @@ pub mod verify;
 pub use keys::{public_key, LICENSE_PUBLIC_KEY_BASE64};
 pub use verify::{
     entitlement_from_license, free_entitlement, Entitlement, EntitlementState, FeatureFlags,
-    PlanTier, LicensePayload,
+    LicensePayload, PlanTier,
 };

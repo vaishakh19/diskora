@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::filesystem::classify;
-use crate::scanner::walker::{DirectoryRecord, FileRecord, ScanRun};
+use crate::filesystem::{classify, FileRecord};
+use crate::scanner::walker::{DirectoryRecord, ScanRun};
 
 /// Children kept per folder in the tree sent to the UI.
 pub const DEFAULT_MAX_CHILDREN: usize = 100;
@@ -89,8 +89,9 @@ impl ScanIndex {
             if let Some(directory) = index.get(&file.parent_path) {
                 let aggregate = &mut aggregates[*directory];
                 aggregate.size_bytes += file.size;
-                aggregate.disk_size_bytes =
-                    Some(aggregate.disk_size_bytes.unwrap_or(0) + file.disk_size.unwrap_or(file.size));
+                aggregate.disk_size_bytes = Some(
+                    aggregate.disk_size_bytes.unwrap_or(0) + file.disk_size.unwrap_or(file.size),
+                );
                 aggregate.file_count += 1;
             }
         }
@@ -109,12 +110,18 @@ impl ScanIndex {
         for position in order {
             let (size, files, folders, disk) = {
                 let aggregate = &aggregates[position];
-                (aggregate.size_bytes, aggregate.file_count, aggregate.folder_count, aggregate.disk_size_bytes)
+                (
+                    aggregate.size_bytes,
+                    aggregate.file_count,
+                    aggregate.folder_count,
+                    aggregate.disk_size_bytes,
+                )
             };
             if let Some(parent) = directories[position].parent {
                 let parent_aggregate = &mut aggregates[parent];
                 parent_aggregate.size_bytes += size;
-                parent_aggregate.disk_size_bytes = Some(parent_aggregate.disk_size_bytes.unwrap_or(0) + disk.unwrap_or(size));
+                parent_aggregate.disk_size_bytes =
+                    Some(parent_aggregate.disk_size_bytes.unwrap_or(0) + disk.unwrap_or(size));
                 parent_aggregate.file_count += files;
                 parent_aggregate.folder_count += folders + 1;
             }
@@ -338,7 +345,14 @@ fn build_node(
 
     let mut candidates: Vec<TreeNode> = Vec::with_capacity(child_dirs.len() + child_files.len());
     for child in &child_dirs {
-        candidates.push(build_node(index, *child, depth + 1, max_children, max_depth, pruned_nodes));
+        candidates.push(build_node(
+            index,
+            *child,
+            depth + 1,
+            max_children,
+            max_depth,
+            pruned_nodes,
+        ));
     }
     for file in &child_files {
         candidates.push(file_node(file));
@@ -350,7 +364,11 @@ fn build_node(
     }
 
     // Keep the biggest consumers; fold the rest into one honest aggregate node.
-    candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| a.path.cmp(&b.path)));
+    candidates.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let keep = max_children - 1;
     let dropped: Vec<TreeNode> = candidates.split_off(keep);
     *pruned_nodes += dropped.len();
@@ -362,7 +380,12 @@ fn build_node(
         .map(|node| node.folder_count + if node.kind == "folder" { 1 } else { 0 })
         .sum();
     let dropped_disk: Option<u64> = if dropped.iter().any(|node| node.disk_size_bytes.is_some()) {
-        Some(dropped.iter().map(|node| node.disk_size_bytes.unwrap_or(0)).sum())
+        Some(
+            dropped
+                .iter()
+                .map(|node| node.disk_size_bytes.unwrap_or(0))
+                .sum(),
+        )
     } else {
         None
     };
@@ -668,9 +691,15 @@ mod tests {
                 },
             );
             let nodes = count_nodes(&result.tree);
-            assert!(nodes <= max_nodes, "{nodes} nodes exceeds the budget of {max_nodes}");
+            assert!(
+                nodes <= max_nodes,
+                "{nodes} nodes exceeds the budget of {max_nodes}"
+            );
             // Monotone: tightening the budget never produces a bigger tree.
-            assert!(nodes <= previous, "the node count grew when the budget tightened");
+            assert!(
+                nodes <= previous,
+                "the node count grew when the budget tightened"
+            );
             previous = nodes;
         }
     }

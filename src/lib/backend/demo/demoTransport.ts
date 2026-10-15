@@ -762,29 +762,13 @@ export function createDemoTransport(): BackendTransport {
       totalSizeBytes: items.reduce((sum, item) => sum + item.sizeBytes, 0),
       totalPathCount: items.length,
       warnings,
+      confirmationToken: null,
     });
   }
 
-  function cleanupExecute(plan: CleanupPlan): Promise<CleanupResult> {
-    // The preview never touches a real filesystem. Report a successful simulation so the
-    // confirmation → execution → refresh flow can be reviewed end to end.
-    const items: CleanupResult['items'] = plan.items.map((item) => ({
-      findingId: item.findingId,
-      title: item.paths[0] ?? item.findingId,
-      action: item.action,
-      removedCount: item.paths.length,
-      failedCount: 0,
-      removedBytes: 0,
-      results: item.paths.map((path) => ({ path, status: 'ok' as const, sizeBytes: 0, detail: 'Simulated (preview)' })),
-    }));
-    return Promise.resolve({
-      items,
-      totalRemovedCount: items.reduce((sum, item) => sum + item.removedCount, 0),
-      totalFailedCount: 0,
-      totalRemovedBytes: 0,
-      completedAt: Date.now(),
-      partial: false,
-    });
+  function cleanupExecute(_plan: CleanupPlan): Promise<CleanupResult> {
+    // Never claim anything was removed in the browser: it is a synthetic, preview-only dataset.
+    return Promise.reject(new Error('Cleanup requires the native Diskwise app. The browser demo cannot delete files.'));
   }
 
   function recycleBinSummary(): Promise<RecycleBinSummary> {

@@ -216,19 +216,18 @@ describe('destructive operations are refused in the browser preview', () => {
     await expect(demo.openPath('C:\\Users')).rejects.toThrow();
   });
 
-  it('cleanup execution reports what would have happened without deleting anything', async () => {
+  it('cleanup can preview but can never claim it removed files', async () => {
     const demo = transport();
     const { scanId } = await scanToCompletion(demo);
-    const result = await demo.cleanupScan(scanId, []);
-    expect(Array.isArray(result)).toBe(true);
-
-    const execution = await demo.cleanupExecute({
-      scanId,
-      items: [],
-      dryRun: true,
-    });
-    expect(execution.totalRemovedCount).toBe(0);
-    expect(execution.totalRemovedBytes).toBe(0);
+    const findings = await demo.cleanupScan(scanId, []);
+    expect(Array.isArray(findings)).toBe(true);
+    const plan = { scanId, items: [], dryRun: true };
+    const preview = await demo.cleanupPreview(plan);
+    expect(preview.confirmationToken).toBeNull();
+    await expect(demo.cleanupExecute(plan)).rejects.toThrow('cannot delete files');
+    await expect(demo.cleanupExecute({ ...plan, dryRun: false, confirmed: true })).rejects.toThrow(
+      'cannot delete files',
+    );
   });
 });
 

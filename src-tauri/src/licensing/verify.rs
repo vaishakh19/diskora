@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::config::product::{CommercialConfig, ProductTier};
-use crate::licensing::payload::{LicensePayload, LicenseError};
+use crate::licensing::payload::{LicenseError, LicensePayload};
 
 /// Mirrors `PlanTier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,7 +302,8 @@ pub fn from_cache(payload_json: &str) -> Entitlement {
         let mut entitlement = free_entitlement();
         entitlement.state = EntitlementState::Invalid;
         entitlement.reason = Some(
-            "The stored licence could not be read. Re-activate to restore your purchase.".to_string(),
+            "The stored licence could not be read. Re-activate to restore your purchase."
+                .to_string(),
         );
         entitlement
     })
@@ -372,7 +373,10 @@ mod tests {
         let entitlement = free_entitlement();
         assert_eq!(entitlement.state, EntitlementState::Free);
         assert!(entitlement.features.core_analysis);
-        assert_eq!(entitlement.duplicate_group_limit, FREE_DUPLICATE_GROUP_LIMIT);
+        assert_eq!(
+            entitlement.duplicate_group_limit,
+            FREE_DUPLICATE_GROUP_LIMIT
+        );
         assert!(!entitlement.features.scan_history);
         assert!(!entitlement.permanent);
     }
@@ -419,7 +423,10 @@ mod tests {
         assert!(!entitlement.state.is_paid());
         // Ownership is still recorded, so the UI can say so.
         assert!(entitlement.permanent);
-        assert!(entitlement.reason.unwrap().contains("purchase is not affected"));
+        assert!(entitlement
+            .reason
+            .unwrap()
+            .contains("purchase is not affected"));
     }
 
     #[test]
@@ -427,7 +434,10 @@ mod tests {
         assert_eq!(EntitlementState::ProActive.as_str(), "pro-active");
         assert_eq!(EntitlementState::ProExpired.as_str(), "pro-expired");
         assert_eq!(EntitlementState::Invalid.as_str(), "invalid");
-        assert_eq!(EntitlementState::parse("pro-active"), EntitlementState::ProActive);
+        assert_eq!(
+            EntitlementState::parse("pro-active"),
+            EntitlementState::ProActive
+        );
         assert_eq!(EntitlementState::parse("nonsense"), EntitlementState::Free);
         assert_eq!(PlanTier::Pro.as_str(), "pro");
     }

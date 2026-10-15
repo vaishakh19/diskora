@@ -65,7 +65,7 @@ pub fn entitlement_get(state: State<'_, AppState>) -> AppResult<Entitlement> {
 #[tauri::command]
 pub fn license_activate(license_key: String, state: State<'_, AppState>) -> AppResult<Entitlement> {
     let now = verify::now_millis();
-    let previous = state.entitlement()?;
+    let previous = state.entitlement();
     let device = state.device.clone();
 
     // Resolve, then re-check the device limit against the local activation ledger.
@@ -78,11 +78,9 @@ pub fn license_activate(license_key: String, state: State<'_, AppState>) -> AppR
 
     if !authorization.is_paid() {
         // Nothing to activate. Record why, and stay free.
-        let reason = authorization
-            .entitlement
-            .reason
-            .clone()
-            .unwrap_or_else(|| "That licence key could not be verified on this machine.".to_string());
+        let reason = authorization.entitlement.reason.clone().unwrap_or_else(|| {
+            "That licence key could not be verified on this machine.".to_string()
+        });
         record_event(&state, previous.state.as_str(), "free", &reason);
         let _ = record_audit(&state, None, "activation-rejected", &reason);
         return Ok(state.entitlement());
@@ -101,8 +99,7 @@ pub fn license_activate(license_key: String, state: State<'_, AppState>) -> AppR
     // deactivated.
     let active = active_devices(&state)?;
     let already_here = active.iter().any(|row| {
-        row.device_binding == device.value
-            || row.device_id == format!("dev-{}", payload.license_id)
+        row.device_binding == device.value || row.device_id == format!("dev-{}", payload.license_id)
     });
     if !already_here && active.len() as u32 >= payload.device_limit {
         let reason = format!(
@@ -152,7 +149,7 @@ pub fn license_activate(license_key: String, state: State<'_, AppState>) -> AppR
 /// service is told separately (by the browser) so it can free the slot.
 #[tauri::command]
 pub fn license_deactivate(state: State<'_, AppState>) -> AppResult<Entitlement> {
-    let previous = state.entitlement()?;
+    let previous = state.entitlement();
     let now = verify::now_millis();
 
     let license_id = {
@@ -165,10 +162,15 @@ pub fn license_deactivate(state: State<'_, AppState>) -> AppResult<Entitlement> 
 
     state.store_license_key(None)?;
     if let Some(license_id) = license_id.as_deref() {
-        let _ = record_audit(&state, Some(license_id), "deactivated", "Device deactivated.");
+        let _ = record_audit(
+            &state,
+            Some(license_id),
+            "deactivated",
+            "Device deactivated.",
+        );
     }
     state.set_authorization(Authorization::free(state.device.clone()));
-    cache_entitlement(&state, &state.entitlement()?)?;
+    cache_entitlement(&state, &state.entitlement())?;
 
     record_event(
         &state,
@@ -226,13 +228,18 @@ pub fn device_activations(state: State<'_, AppState>) -> AppResult<Vec<DeviceAct
 /// Only the *current* device can be deactivated here. Releasing a device you do not own would be
 /// a way to defeat the limit, and it must go through the authenticated account flow instead.
 #[tauri::command]
-pub fn device_deactivate(device_id: String, state: State<'_, AppState>) -> AppResult<Vec<DeviceActivation>> {
+pub fn device_deactivate(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<DeviceActivation>> {
     let now = verify::now_millis();
     let active = active_devices(&state)?;
     let target = active
         .iter()
         .find(|row| row.device_id == device_id)
-        .ok_or_else(|| AppError::InvalidArgument("That device is not active on this licence.".to_string()))?;
+        .ok_or_else(|| {
+            AppError::InvalidArgument("That device is not active on this licence.".to_string())
+        })?;
 
     if target.device_binding != state.device.value {
         return Err(AppError::NotPermitted(
@@ -261,9 +268,7 @@ pub fn device_deactivate(device_id: String, state: State<'_, AppState>) -> AppRe
 
 /* ------------------------------- helpers ------------------------------- */
 
-fn active_devices(
-    state: &AppState,
-) -> AppResult<Vec<crate::storage::db::DeviceActivationRow>> {
+fn active_devices(state: &AppState) -> AppResult<Vec<crate::storage::db::DeviceActivationRow>> {
     let guard = state.database()?;
     match guard.as_ref() {
         Some(database) => database.active_device_activations(),
@@ -372,7 +377,10 @@ mod tests {
             Authorization::resolve(Some("not-a-key"), &DEFAULT_CONFIG, 0, app.device.clone());
         assert!(!authorization.is_paid());
         let reason = authorization.entitlement.reason.expect("a reason");
-        assert!(reason.contains("key") || reason.contains("licence"), "reason was {reason}");
+        assert!(
+            reason.contains("key") || reason.contains("licence"),
+            "reason was {reason}"
+        );
     }
 
     #[test]

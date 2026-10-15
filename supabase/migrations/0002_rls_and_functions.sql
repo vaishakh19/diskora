@@ -216,19 +216,22 @@ security definer
 set search_path = public
 as $$
 declare
-  window bigint;
+  current_window_start bigint;
 begin
-  window := (now_ms / window_ms) * window_ms;
+  if window_ms <= 0 or cap <= 0 then
+    raise exception 'invalid_rate_limit' using errcode = 'check_violation';
+  end if;
+  current_window_start := (now_ms / window_ms) * window_ms;
 
   insert into rate_limits (bucket, subject, window_start, count)
-  values (bucket, subject, window, 1)
-  on conflict (bucket, subject, window_start)
+  values (bucket, subject, current_window_start, 1)
+  on conflict on constraint rate_limits_pkey
     do update set count = rate_limits.count + 1;
 
-  return (select count from rate_limits
-           where bucket = rate_limit_hit.bucket
-             and subject = rate_limit_hit.subject
-             and window_start = window) <= cap;
+  return (select rate_limits.count from rate_limits
+           where rate_limits.bucket = rate_limit_hit.bucket
+             and rate_limits.subject = rate_limit_hit.subject
+             and rate_limits.window_start = current_window_start) <= cap;
 end;
 $$;
 

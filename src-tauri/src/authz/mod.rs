@@ -96,10 +96,7 @@ impl Authorization {
                     .cloned()
                     .unwrap_or_else(|| config.default_tier().clone());
                 let entitlement = crate::licensing::verify::entitlement_from_payload(
-                    &verified,
-                    &tier,
-                    config,
-                    now,
+                    &verified, &tier, config, now,
                 );
                 Authorization {
                     entitlement,
@@ -236,9 +233,9 @@ mod tests {
     #[test]
     fn a_valid_licence_grants_paid_permissions() {
         let signing = signing_key();
-        let config = config(&base64::engine::general_purpose::STANDARD.encode(
-            signing.verifying_key().to_bytes(),
-        ));
+        let config = config(
+            &base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes()),
+        );
         let auth = licensed(&config, &signing);
         assert!(auth.is_paid());
         for permission in PERMISSIONS.iter() {
@@ -249,9 +246,9 @@ mod tests {
     #[test]
     fn a_forged_licence_denies_paid_permissions() {
         let signing = signing_key();
-        let config = config(&base64::engine::general_purpose::STANDARD.encode(
-            signing.verifying_key().to_bytes(),
-        ));
+        let config = config(
+            &base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes()),
+        );
         let attacker = SigningKey::from_bytes(&[13u8; 32]);
         let payload = LicensePayload::permanent(
             "lic-1",
@@ -261,7 +258,10 @@ mod tests {
             NOW - 1000,
             3,
         );
-        let key = encode(&payload, &attacker.sign(&payload_bytes(&payload)).to_bytes());
+        let key = encode(
+            &payload,
+            &attacker.sign(&payload_bytes(&payload)).to_bytes(),
+        );
         let auth = Authorization::resolve(Some(&key), &config, NOW, device());
         assert!(!auth.is_paid());
         assert!(authorize(&auth, Permission::PaidCleanup).is_err());
@@ -272,9 +272,9 @@ mod tests {
     #[test]
     fn a_licence_bound_to_another_device_denies_paid_permissions() {
         let signing = signing_key();
-        let config = config(&base64::engine::general_purpose::STANDARD.encode(
-            signing.verifying_key().to_bytes(),
-        ));
+        let config = config(
+            &base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes()),
+        );
         let payload = LicensePayload::permanent(
             "lic-1",
             "diskwise-pro",
@@ -318,7 +318,9 @@ mod tests {
     #[test]
     fn the_error_message_points_the_customer_at_a_remedy() {
         let auth = Authorization::free(device());
-        let error = authorize(&auth, Permission::PaidCleanup).unwrap_err().to_string();
+        let error = authorize(&auth, Permission::PaidCleanup)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Pro"), "message: {error}");
         assert!(
             error.contains("always free") || error.contains("free"),

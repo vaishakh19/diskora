@@ -60,7 +60,9 @@ impl AppError {
             AppError::NotFound(_) => "not-found",
             AppError::LongPath(_) => "long-path",
             AppError::SymlinkCycle(_) => "symlink-cycle",
-            AppError::NotPermitted(_) | AppError::InvalidArgument(_) | AppError::Changed(_) => "other",
+            AppError::NotPermitted(_) | AppError::InvalidArgument(_) | AppError::Changed(_) => {
+                "other"
+            }
             AppError::Io { .. } => "io",
             AppError::Database(_) | AppError::Licence(_) | AppError::Internal(_) => "other",
         }

@@ -12,17 +12,20 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::authz::Authorization;
+use crate::cleanup::execute::PreviewTicket;
+use crate::cleanup::rules::CleanupFinding;
 use crate::config::product::CommercialConfig;
 use crate::duplicates::grouping::{DuplicateOptions, DuplicateReport};
 use crate::licensing::payload::DeviceBinding;
 use crate::licensing::verify::Entitlement;
 use crate::scanner::aggregate::{PruneOptions, ScanIndex};
-use crate::scanner::progress::{ProgressCounters, ProgressSnapshot};
+use crate::scanner::progress::{ProgressCounters, ProgressSnapshot, ScanPhase, ScanStatus};
 use crate::scanner::walker::ScanRun;
 use crate::settings::AppSettings;
 use crate::storage::db::Database;
 
 /// One completed (or in-flight) scan.
+#[derive(Clone)]
 pub struct ScanEntry {
     pub scan_id: String,
     pub root_path: String,
@@ -48,6 +51,10 @@ pub struct AppState {
     pub cancelled: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub duplicate_reports: Mutex<HashMap<String, DuplicateReport>>,
     pub duplicate_options: Mutex<HashMap<String, DuplicateOptions>>,
+    /// Last findings derived by Rust for a specific complete scan, not supplied by execute input.
+    pub cleanup_findings: Mutex<Option<(String, Vec<CleanupFinding>)>>,
+    /// A one-use, short-lived native preview binding the exact paths and actions.
+    pub cleanup_preview: Mutex<Option<PreviewTicket>>,
     /// What this install is allowed to do. Never written by the webview.
     pub authorization: Mutex<Option<Authorization>>,
     /// This machine's device binding.
@@ -74,6 +81,8 @@ impl AppState {
             cancelled: Mutex::new(HashMap::new()),
             duplicate_reports: Mutex::new(HashMap::new()),
             duplicate_options: Mutex::new(HashMap::new()),
+            cleanup_findings: Mutex::new(None),
+            cleanup_preview: Mutex::new(None),
             authorization: Mutex::new(None),
             // A placeholder binding until `setup` replaces it with the real one.
             device: DeviceBinding {
@@ -81,7 +90,7 @@ impl AppState {
             },
             settings: Mutex::new(None),
             prune: PruneOptions::default(),
-            config: CommercialConfig::default(),
+            config: crate::config::product::DEFAULT_CONFIG.clone(),
         }
     }
 
@@ -96,7 +105,9 @@ impl AppState {
             .map_err(|_| "The database lock was poisoned.".to_string())
     }
 
-    pub fn scans(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<ScanEntry>>>, String> {
+    pub fn scans(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<ScanEntry>>>, String> {
         self.scans
             .lock()
             .map_err(|_| "The scan registry lock was poisoned.".to_string())
@@ -164,17 +175,31 @@ pub fn snapshot(
     elapsed_ms: u64,
     expected: Option<u64>,
 ) -> ProgressSnapshot {
-    let (percent, eta_ms) = crate::scanner::progress::estimate(counters.bytes(), expected, elapsed_ms);
+    let (percent, eta_ms) =
+        crate::scanner::progress::estimate(counters.bytes(), expected, elapsed_ms);
+    let phase = counters.phase();
+    let status = match phase {
+        ScanPhase::Cancelled => ScanStatus::Cancelled,
+        ScanPhase::Error => ScanStatus::Error,
+        ScanPhase::Done if counters.error_count() > 0 || counters.is_truncated() => {
+            ScanStatus::Partial
+        }
+        ScanPhase::Done => ScanStatus::Complete,
+        _ => ScanStatus::Running,
+    };
     ProgressSnapshot {
-        phase: counters.phase(),
-        files: counters.files(),
-        folders: counters.folders(),
-        bytes: counters.bytes(),
+        scan_id: scan_id.to_string(),
+        phase,
+        status,
+        files_scanned: counters.files(),
+        folders_scanned: counters.folders(),
+        bytes_analyzed: counters.bytes(),
         errors: counters.error_count(),
         current_path: counters.current_path(),
         elapsed_ms,
         eta_ms,
         percent,
+        truncated: counters.is_truncated(),
     }
 }
 
@@ -191,12 +216,14 @@ pub fn entry_from_run(
     let duration_ms = finished_at - started_at;
     let status = if run.cancelled {
         "cancelled".to_string()
-    } else if run.errors.is_empty() {
+    } else if run.directories.is_empty() {
+        "error".to_string()
+    } else if run.errors.is_empty() && !run.hit_limit {
         "complete".to_string()
     } else {
         "partial".to_string()
     };
-    let index = Arc::new(ScanIndex::from_run(&run));
+    let index = (!run.directories.is_empty()).then(|| Arc::new(ScanIndex::from_run(&run)));
     ScanEntry {
         scan_id,
         root_path,
@@ -204,7 +231,7 @@ pub fn entry_from_run(
         started_at,
         finished_at: Some(finished_at),
         status,
-        index: Some(index),
+        index,
         errors: run.errors,
         pruned_nodes: 0,
         expected_bytes,
@@ -223,7 +250,10 @@ mod tests {
         let auth = state.authorization().expect("resolves");
         assert!(!auth.is_paid());
         assert!(auth.entitlement.features.core_analysis);
-        assert_eq!(state.entitlement().state, crate::licensing::verify::EntitlementState::Free);
+        assert_eq!(
+            state.entitlement().state,
+            crate::licensing::verify::EntitlementState::Free
+        );
     }
 
     #[test]

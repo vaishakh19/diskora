@@ -142,7 +142,9 @@ pub fn classify(path: &Path, is_folder: bool) -> String {
     if ARCHIVE_EXTENSIONS.contains(&extension.as_str()) {
         return CATEGORY_ARCHIVES.to_string();
     }
-    if CODE_EXTENSIONS.contains(&extension.as_str()) || EXECUTABLE_EXTENSIONS.contains(&extension.as_str()) {
+    if CODE_EXTENSIONS.contains(&extension.as_str())
+        || EXECUTABLE_EXTENSIONS.contains(&extension.as_str())
+    {
         return CATEGORY_DEVELOPMENT.to_string();
     }
     if DOCUMENT_EXTENSIONS.contains(&extension.as_str()) {

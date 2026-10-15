@@ -109,6 +109,9 @@ mod tests {
         let settings = AppSettings::default();
         let json = serde_json::to_string(&settings).unwrap();
         let decoded: AppSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.max_children_per_node, settings.max_children_per_node);
+        assert_eq!(
+            decoded.max_children_per_node,
+            settings.max_children_per_node
+        );
     }
 }

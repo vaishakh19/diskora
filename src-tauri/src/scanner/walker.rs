@@ -1,13 +1,13 @@
 //! The directory walker.
 //!
-//! A bounded pool of workers pulls directories off a shared queue. Each worker reads one directory,
-//! records its files, and pushes its sub-directories back onto the queue. That gives breadth-first
-//! traversal (so progress and ETA are meaningful early) with bounded concurrency (so a huge tree
-//! cannot exhaust handles or memory).
+//! A bounded pool of workers pulls directories off a shared work stack. Each worker reads one
+//! directory, records its files, and queues its sub-directories. The stack limits pending work on
+//! deep trees; the worker count bounds open handles. Completion must be signalled by the *last*
+//! worker, not by the thread joining them, or an empty directory deadlocks every scan.
 //!
 //! Safety rules enforced here:
-//!   - `symlink_metadata` is used, so links are never followed unless the caller opts in,
-//!   - a directory is only ever queued once: the visited set is keyed on the canonical path,
+//!   - `symlink_metadata` is used; reparse points are never traversed,
+//!   - each directory is queued only once within the canonical scan root,
 //!   - permission denials, missing paths, long paths and vanished files are recorded, not guessed,
 //!   - cancellation is checked on every entry, so cancelling stops within one directory read.
 
@@ -98,6 +98,7 @@ struct WorkQueue {
 #[derive(Default)]
 struct QueueState {
     pending: Vec<(PathBuf, usize)>,
+    active: usize,
     finished: bool,
 }
 
@@ -106,6 +107,7 @@ impl WorkQueue {
         WorkQueue {
             inner: Mutex::new(QueueState {
                 pending: vec![(root, 0)],
+                active: 0,
                 finished: false,
             }),
             available: Condvar::new(),
@@ -114,30 +116,59 @@ impl WorkQueue {
 
     fn push(&self, path: PathBuf, depth: usize) {
         if let Ok(mut state) = self.inner.lock() {
-            state.pending.push((path, depth));
-            drop(state);
+            if !state.finished {
+                state.pending.push((path, depth));
+                self.available.notify_one();
+            }
         }
-        self.available.notify_one();
     }
 
     fn pop(&self) -> Option<(PathBuf, usize)> {
         let mut state = self.inner.lock().ok()?;
         loop {
+            if state.finished {
+                return None;
+            }
             if let Some(item) = state.pending.pop() {
+                state.active += 1;
                 return Some(item);
             }
-            if state.finished {
+            if state.active == 0 {
+                // Nobody is working and there are no pending directories: terminate all workers.
+                state.finished = true;
+                self.available.notify_all();
                 return None;
             }
             state = self.available.wait(state).ok()?;
         }
     }
 
+    fn complete(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            debug_assert!(state.active > 0);
+            state.active -= 1;
+            if state.active == 0 && state.pending.is_empty() {
+                state.finished = true;
+                self.available.notify_all();
+            }
+        }
+    }
+
     fn finish(&self) {
         if let Ok(mut state) = self.inner.lock() {
+            state.pending.clear();
             state.finished = true;
+            self.available.notify_all();
         }
-        self.available.notify_all();
+    }
+}
+
+/// Each popped directory is completed even if a worker returns early or unwinds.
+struct WorkTicket<'a>(&'a WorkQueue);
+
+impl Drop for WorkTicket<'_> {
+    fn drop(&mut self) {
+        self.0.complete();
     }
 }
 
@@ -170,6 +201,7 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
             });
         }
         Ok(_) => {
+            counters.add_error();
             run.errors.push(WalkError {
                 path: options.root_path.clone(),
                 kind: "not-found".to_string(),
@@ -179,6 +211,7 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
             return run;
         }
         Err(error) => {
+            counters.add_error();
             run.errors.push(WalkError {
                 path: options.root_path.clone(),
                 kind: error_kind(&error),
@@ -189,10 +222,37 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
         }
     }
 
+    if options.follow_links {
+        counters.add_error();
+        run.errors.push(WalkError {
+            path: options.root_path.clone(),
+            kind: "other".to_string(),
+            message:
+                "Following links/junctions is disabled until reparse-point safety is verified."
+                    .to_string(),
+        });
+        run.hit_limit = true;
+        return run;
+    }
+
+    let root_key = match canonical_key(&root) {
+        Ok(key) => key,
+        Err(error) => {
+            counters.add_error();
+            run.errors.push(WalkError {
+                path: options.root_path.clone(),
+                kind: error_kind(&error),
+                message: format!("Cannot resolve the scan root: {error}"),
+            });
+            run.hit_limit = true;
+            return run;
+        }
+    };
     counters.set_phase(ScanPhase::Walking);
 
     let queue = Arc::new(WorkQueue::with_root(root.clone()));
-    let visited: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+    let visited: Arc<Mutex<HashSet<PathBuf>>> =
+        Arc::new(Mutex::new(HashSet::from([root_key.clone()])));
     let output: Arc<Mutex<WorkOutput>> = Arc::new(Mutex::new(WorkOutput::default()));
 
     let workers = worker_count();
@@ -203,35 +263,60 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
         let output = Arc::clone(&output);
         let counters = Arc::clone(counters);
         let options = options.clone();
+        let root_key = root_key.clone();
 
         handles.push(std::thread::spawn(move || {
             while let Some((dir, depth)) = queue.pop() {
+                let _ticket = WorkTicket(&queue);
                 if counters.is_cancelled() {
+                    queue.finish(); // Wake workers already waiting on the condvar.
                     break;
                 }
                 if options.max_depth > 0 && depth >= options.max_depth as usize {
+                    if counters.mark_truncated() {
+                        counters.add_error();
+                        record(&output, |out| {
+                            out.errors.push(WalkError {
+                                path: dir.to_string_lossy().to_string(),
+                                kind: "limit-exceeded".to_string(),
+                                message: format!(
+                                    "Stopped at directory depth {}.",
+                                    options.max_depth
+                                ),
+                            })
+                        });
+                    }
                     continue;
                 }
                 counters.set_current_path(&dir.to_string_lossy());
-                scan_directory(&dir, depth, &options, &counters, &queue, &visited, &output);
+                scan_directory(
+                    &dir, depth, &options, &counters, &queue, &visited, &output, &root_key,
+                );
             }
         }));
     }
 
     for handle in handles {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            counters.add_error();
+            run.errors.push(WalkError {
+                path: options.root_path.clone(),
+                kind: "other".to_string(),
+                message: "A scan worker failed unexpectedly; results may be incomplete."
+                    .to_string(),
+            });
+            run.hit_limit = true;
+        }
     }
-    queue.finish();
 
     counters.set_phase(ScanPhase::Aggregating);
 
     if let Ok(mut collected) = output.lock() {
         collected.files.sort_by(|a, b| a.path.cmp(&b.path));
-        collected
-            .directories
-            .sort_by(|a, b| a.path.cmp(&b.path));
+        collected.directories.sort_by(|a, b| a.path.cmp(&b.path));
         run.files = std::mem::take(&mut collected.files);
-        run.directories.extend(std::mem::take(&mut collected.directories));
+        run.directories
+            .extend(std::mem::take(&mut collected.directories));
         run.errors.extend(std::mem::take(&mut collected.errors));
 
         // Mark directories that turned out to be unreadable.
@@ -244,7 +329,7 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
     }
 
     run.cancelled = counters.is_cancelled();
-    run.hit_limit = run.cancelled;
+    run.hit_limit |= run.cancelled || counters.is_truncated();
     run.elapsed_ms = started.elapsed().as_millis() as u64;
     run
 }
@@ -258,23 +343,48 @@ fn scan_directory(
     queue: &WorkQueue,
     visited: &Mutex<HashSet<PathBuf>>,
     output: &Mutex<WorkOutput>,
+    root_key: &Path,
 ) {
+    // Recheck at dequeue time: a directory may have changed since it was queued.
+    match canonical_key(dir) {
+        Ok(key) if key.starts_with(root_key) => {}
+        Ok(_) => {
+            counters.add_error();
+            record(output, |out| {
+                out.errors.push(WalkError {
+                    path: dir.to_string_lossy().to_string(),
+                    kind: "other".to_string(),
+                    message: "Directory resolved outside the chosen scan root; skipping."
+                        .to_string(),
+                })
+            });
+            return;
+        }
+        Err(error) => {
+            counters.add_error();
+            record(output, |out| {
+                out.errors.push(WalkError {
+                    path: dir.to_string_lossy().to_string(),
+                    kind: error_kind(&error),
+                    message: error.to_string(),
+                })
+            });
+            return;
+        }
+    }
     let long_path = crate::filesystem::long_path::to_unc_long_path(dir);
     let entries = match std::fs::read_dir(&long_path) {
         Ok(entries) => entries,
         Err(error) => {
             counters.add_error();
-            record(
-                output,
-                |out| {
-                    out.errors.push(WalkError {
-                        path: dir.to_string_lossy().to_string(),
-                        kind: error_kind(&error),
-                        message: error.to_string(),
-                    });
-                    out.denied.push(dir.to_path_buf());
-                },
-            );
+            record(output, |out| {
+                out.errors.push(WalkError {
+                    path: dir.to_string_lossy().to_string(),
+                    kind: error_kind(&error),
+                    message: error.to_string(),
+                });
+                out.denied.push(dir.to_path_buf());
+            });
             return;
         }
     };
@@ -283,18 +393,6 @@ fn scan_directory(
         if counters.is_cancelled() {
             return;
         }
-        if options.max_entries > 0 && (counters.files() + counters.folders()) >= options.max_entries {
-            counters.add_error();
-            record(output, |out| {
-                out.errors.push(WalkError {
-                    path: dir.to_string_lossy().to_string(),
-                    kind: "limit-exceeded".to_string(),
-                    message: format!("Stopped after {} entries.", options.max_entries),
-                });
-            });
-            return;
-        }
-
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -331,11 +429,25 @@ fn scan_directory(
             continue;
         }
 
-        // Links are recorded but never traversed unless the caller opts in. This is what stops
-        // junction loops and double counting.
-        if meta.is_symlink && !options.follow_links {
-            counters.add_folder();
+        // Links and reparse points are not indexed or traversed. The metadata probe above never
+        // follows them; the command rejects requests to follow them until Windows is verified.
+        if meta.is_symlink {
             continue;
+        }
+
+        if !counters.claim_entry(options.max_entries) {
+            if counters.mark_truncated() {
+                counters.add_error();
+                record(output, |out| {
+                    out.errors.push(WalkError {
+                        path: dir.to_string_lossy().to_string(),
+                        kind: "limit-exceeded".to_string(),
+                        message: format!("Stopped after {} entries.", options.max_entries),
+                    })
+                });
+            }
+            queue.finish();
+            return;
         }
 
         match meta.kind {
@@ -355,24 +467,51 @@ fn scan_directory(
                 });
             }
             Kind::Folder => {
-                counters.add_folder();
-                let key = canonical_key(&path);
+                let key = match canonical_key(&path) {
+                    Ok(key) if key.starts_with(root_key) => key,
+                    Ok(_) => {
+                        counters.add_error();
+                        record(output, |out| {
+                            out.errors.push(WalkError {
+                                path: path.to_string_lossy().to_string(),
+                                kind: "other".to_string(),
+                                message:
+                                    "Directory resolved outside the chosen scan root; skipping."
+                                        .to_string(),
+                            })
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        counters.add_error();
+                        record(output, |out| {
+                            out.errors.push(WalkError {
+                                path: path.to_string_lossy().to_string(),
+                                kind: error_kind(&error),
+                                message: error.to_string(),
+                            })
+                        });
+                        continue;
+                    }
+                };
                 let fresh = match visited.lock() {
                     Ok(mut guard) => guard.insert(key),
                     Err(_) => false,
                 };
                 if !fresh {
+                    counters.add_error();
                     record(output, |out| {
                         out.errors.push(WalkError {
                             path: path.to_string_lossy().to_string(),
                             kind: "symlink-cycle".to_string(),
-                            message: "This directory was already visited; skipping to avoid a loop."
-                                .to_string(),
-                        });
+                            message:
+                                "This directory was already visited; skipping to avoid a loop."
+                                    .to_string(),
+                        })
                     });
                     continue;
                 }
-
+                counters.add_folder();
                 record(output, |out| {
                     out.directories.push(DirectoryRecord {
                         path: path.clone(),
@@ -414,11 +553,10 @@ fn error_kind(error: &std::io::Error) -> String {
     }
 }
 
-/// Canonicalisation is best-effort: when it fails the lexical path is used, which still catches the
-/// common self-referential junction case.
-fn canonical_key(path: &Path) -> PathBuf {
+/// Canonicalisation must succeed: a lexical fallback cannot establish root containment.
+fn canonical_key(path: &Path) -> std::io::Result<PathBuf> {
     let long = crate::filesystem::long_path::to_unc_long_path(path);
-    std::fs::canonicalize(&long).unwrap_or(long)
+    std::fs::canonicalize(&long)
 }
 
 /// Display name for a scan root: `C:\` becomes `Local Disk (C:)`, a folder becomes its name.
@@ -451,10 +589,107 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("diskwise-walk-{name}-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("diskwise-walk-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn an_empty_root_finishes_instead_of_waiting_for_idle_workers() {
+        let root = temp_dir("idle");
+        let (send, receive) = std::sync::mpsc::channel();
+        let path = root.to_string_lossy().to_string();
+        let handle = std::thread::spawn(move || {
+            let counters = Arc::new(ProgressCounters::new());
+            let run = walk(
+                &ScanOptions {
+                    root_path: path,
+                    ..Default::default()
+                },
+                &counters,
+            );
+            send.send(run).unwrap();
+        });
+        let run = receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("an empty scan deadlocked");
+        handle.join().unwrap();
+        assert_eq!(run.directories.len(), 1);
+        assert!(!run.hit_limit);
+        assert!(run.errors.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_fanout_finishes_after_every_worker_becomes_idle() {
+        let root = temp_dir("fanout");
+        for n in 0..32 {
+            let folder = root.join(format!("sub-{n}"));
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("one.dat"), [42u8]).unwrap();
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let path = root.to_string_lossy().to_string();
+        let handle = std::thread::spawn(move || {
+            let counters = Arc::new(ProgressCounters::new());
+            send.send(walk(
+                &ScanOptions {
+                    root_path: path,
+                    ..Default::default()
+                },
+                &counters,
+            ))
+            .unwrap();
+        });
+        let run = receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("parallel scan deadlocked");
+        handle.join().unwrap();
+        assert_eq!(run.files.len(), 32);
+        assert_eq!(run.directories.len(), 33);
+        assert!(run.errors.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancellation_wakes_workers_blocked_on_empty_work() {
+        let queue = Arc::new(WorkQueue::with_root(PathBuf::from("unused")));
+        let _active = queue.pop().expect("root work");
+        let other = Arc::clone(&queue);
+        let (send, receive) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            send.send(other.pop()).unwrap();
+        });
+        queue.finish();
+        assert!(receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .is_none());
+        queue.complete();
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_outside_the_scan_root_is_not_traversed() {
+        let root = temp_dir("escape");
+        let outside = temp_dir("escape-target");
+        fs::write(outside.join("private.txt"), [7u8]).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let counters = Arc::new(ProgressCounters::new());
+        let run = walk(
+            &ScanOptions {
+                root_path: root.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            &counters,
+        );
+        assert!(run.files.is_empty());
+        assert_eq!(run.directories.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
@@ -510,6 +745,11 @@ mod tests {
         let counters = Arc::new(ProgressCounters::new());
         let run = walk(&options, &counters);
         assert!(run.files.is_empty(), "depth 2 never enters `c`");
+        assert!(run.hit_limit);
+        assert!(run
+            .errors
+            .iter()
+            .any(|error| error.kind == "limit-exceeded"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -527,8 +767,12 @@ mod tests {
         };
         let counters = Arc::new(ProgressCounters::new());
         let run = walk(&options, &counters);
-        assert!(run.files.len() <= 11, "the cap is approximate by one entry");
-        assert!(run.errors.iter().any(|error| error.kind == "limit-exceeded"));
+        assert_eq!(run.files.len(), 10, "the cap is atomic across workers");
+        assert!(run.hit_limit);
+        assert!(run
+            .errors
+            .iter()
+            .any(|error| error.kind == "limit-exceeded"));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -78,7 +78,10 @@ const SE_ERR_SUCCESS_THRESHOLD: usize = 32;
 
 /// Wide, NUL-terminated copy of a path. Windows APIs want this form.
 pub fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn wide_str(value: &str) -> Vec<u16> {
@@ -201,8 +204,13 @@ fn volume_info(root: &str) -> VolumeInfo {
     } != 0;
 
     let label = if info_ok {
-        let end = name_buf.iter().position(|c| *c == 0).unwrap_or(name_buf.len());
-        String::from_utf16_lossy(&name_buf[..end]).trim().to_string()
+        let end = name_buf
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(name_buf.len());
+        String::from_utf16_lossy(&name_buf[..end])
+            .trim()
+            .to_string()
     } else {
         String::new()
     };

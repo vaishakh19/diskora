@@ -13,6 +13,8 @@ pub mod grouping;
 pub mod hashing;
 pub mod verify;
 
-pub use grouping::{group_by_size, DuplicateGroup, DuplicateOptions, DuplicateReport, DuplicateFile};
+pub use grouping::{
+    group_by_size, DuplicateFile, DuplicateGroup, DuplicateOptions, DuplicateReport,
+};
 pub use hashing::{hash_file, HashAlgorithm};
 pub use verify::{verify_identical, VerifyResult};

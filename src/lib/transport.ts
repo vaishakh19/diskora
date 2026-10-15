@@ -105,6 +105,16 @@ export function isTauriRuntime(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ ?? w.isTauri);
 }
 
+/** A packaged app must never silently render synthetic data when native injection fails. */
+export function isPackagedOrigin(location: Pick<Location, 'protocol' | 'hostname'>): boolean {
+  return (
+    location.hostname === 'tauri.localhost' ||
+    location.protocol === 'tauri:' ||
+    location.protocol === 'asset:' ||
+    location.protocol === 'file:'
+  );
+}
+
 /**
  * Returns the active transport. The choice is made once per session and is sticky so a
  * mid-session change cannot silently switch the app between a real and a synthetic backend.
@@ -114,6 +124,8 @@ export async function getTransport(): Promise<BackendTransport> {
   if (isTauriRuntime()) {
     const { createTauriTransport } = await import('./backend/tauriTransport');
     cached = createTauriTransport();
+  } else if (typeof window !== 'undefined' && isPackagedOrigin(window.location)) {
+    throw new Error('The packaged app could not connect to its native backend. No synthetic data has been loaded. Restart Diskwise or reinstall it.');
   } else {
     const { createDemoTransport } = await import('./backend/demo/demoTransport');
     cached = createDemoTransport();

@@ -42,7 +42,9 @@ pub fn file_details(path: String, state: State<'_, AppState>) -> AppResult<FileD
     crate::authz::authorize_state(&state, crate::authz::Permission::FileInspection)?;
     let candidate = PathBuf::from(&path);
     if path.trim().is_empty() {
-        return Err(AppError::InvalidArgument("No path was provided.".to_string()));
+        return Err(AppError::InvalidArgument(
+            "No path was provided.".to_string(),
+        ));
     }
     if path.ends_with("\\[Other]") {
         return Err(AppError::InvalidArgument(
@@ -50,8 +52,7 @@ pub fn file_details(path: String, state: State<'_, AppState>) -> AppResult<FileD
         ));
     }
 
-    let meta = read_metadata(&candidate, 0)
-        .map_err(|error| AppError::io(&path, &error))?;
+    let meta = read_metadata(&candidate, 0).map_err(|error| AppError::io(&path, &error))?;
 
     // Prefer the scan's aggregated totals for folders so the numbers match the visualization.
     let (file_count, folder_count, size_bytes, disk_size_bytes) = if meta.kind == Kind::Folder {
@@ -80,7 +81,12 @@ pub fn file_details(path: String, state: State<'_, AppState>) -> AppResult<FileD
     Ok(FileDetails {
         path: path.clone(),
         name: meta.name,
-        kind: if meta.kind == Kind::Folder { "folder" } else { "file" }.to_string(),
+        kind: if meta.kind == Kind::Folder {
+            "folder"
+        } else {
+            "file"
+        }
+        .to_string(),
         size_bytes,
         disk_size_bytes,
         file_count,
@@ -122,7 +128,12 @@ fn find_index(
     let mut best: Option<(i64, std::sync::Arc<crate::scanner::aggregate::ScanIndex>)> = None;
     for entry in scans.values() {
         if let Some(index) = entry.index.clone() {
-            if index.position_of(path).is_some() && best.as_ref().map(|(at, _)| entry.started_at > *at).unwrap_or(true) {
+            if index.position_of(path).is_some()
+                && best
+                    .as_ref()
+                    .map(|(at, _)| entry.started_at > *at)
+                    .unwrap_or(true)
+            {
                 best = Some((entry.started_at, index));
             }
         }
@@ -150,10 +161,14 @@ pub fn open_path(path: String) -> AppResult<()> {
 pub(crate) fn validate_path(path: &str) -> AppResult<()> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return Err(AppError::InvalidArgument("No path was provided.".to_string()));
+        return Err(AppError::InvalidArgument(
+            "No path was provided.".to_string(),
+        ));
     }
     if trimmed.contains('\0') {
-        return Err(AppError::InvalidArgument("The path contains a NUL byte.".to_string()));
+        return Err(AppError::InvalidArgument(
+            "The path contains a NUL byte.".to_string(),
+        ));
     }
     if trimmed.ends_with("\\[Other]") {
         return Err(AppError::InvalidArgument(

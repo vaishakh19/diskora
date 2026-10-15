@@ -146,7 +146,10 @@ pub async fn find_duplicates(
 
 /// Returns a finished report, or `None` when it is unknown or still running.
 #[tauri::command]
-pub fn duplicates_get(report_id: String, state: State<'_, AppState>) -> AppResult<Option<DuplicateReport>> {
+pub fn duplicates_get(
+    report_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<Option<DuplicateReport>> {
     crate::authz::authorize_state(&state, crate::authz::Permission::BasicDuplicates)?;
     let registry = state
         .duplicate_reports
@@ -157,11 +160,16 @@ pub fn duplicates_get(report_id: String, state: State<'_, AppState>) -> AppResul
 
 /// Byte-for-byte comparison of two files, used by the "are these really identical?" action.
 #[tauri::command]
-pub fn verify_duplicates(path_a: String, path_b: String) -> AppResult<crate::duplicates::verify::VerifyResult> {
+pub fn verify_duplicates(
+    path_a: String,
+    path_b: String,
+) -> AppResult<crate::duplicates::verify::VerifyResult> {
     // Byte-level verification of a pair is part of finding duplicates, which is free.
     for path in [&path_a, &path_b] {
         if path.trim().is_empty() {
-            return Err(AppError::InvalidArgument("Two paths are required.".to_string()));
+            return Err(AppError::InvalidArgument(
+                "Two paths are required.".to_string(),
+            ));
         }
     }
     let result = verify_identical(
@@ -174,7 +182,8 @@ pub fn verify_duplicates(path_a: String, path_b: String) -> AppResult<crate::dup
 
 /// `None` means unlimited; otherwise the free tier's group cap.
 fn free_group_limit(authorization: &crate::authz::Authorization) -> Option<usize> {
-    if crate::authz::authorize(authorization, crate::authz::Permission::UnlimitedDuplicates).is_ok() {
+    if crate::authz::authorize(authorization, crate::authz::Permission::UnlimitedDuplicates).is_ok()
+    {
         return None;
     }
     Some(DEFAULT_CONFIG.free_duplicate_group_limit as usize)

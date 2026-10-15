@@ -228,7 +228,12 @@ where
                 a.modified_at
                     .unwrap_or(i64::MAX)
                     .cmp(&b.modified_at.unwrap_or(i64::MAX))
-                    .then_with(|| a.path.matches('\\').count().cmp(&b.path.matches('\\').count()))
+                    .then_with(|| {
+                        a.path
+                            .matches('\\')
+                            .count()
+                            .cmp(&b.path.matches('\\').count())
+                    })
                     .then_with(|| a.path.cmp(&b.path))
             });
             if let Some(first) = entries.first_mut() {
@@ -284,12 +289,15 @@ pub fn retain_existing(groups: &mut Vec<DuplicateGroup>) -> usize {
     let mut removed = 0usize;
     for group in groups.iter_mut() {
         let before = group.copies.len();
-        group.copies
+        group
+            .copies
             .retain(|copy| PathBuf::from(&copy.path).exists());
         let after = group.copies.len();
         if after < before {
             removed += before - after;
-            group.reclaimable_bytes = group.size_bytes.saturating_mul(after.saturating_sub(1) as u64);
+            group.reclaimable_bytes = group
+                .size_bytes
+                .saturating_mul(after.saturating_sub(1) as u64);
             if after < 2 {
                 group.reclaimable_bytes = 0;
             }
@@ -393,7 +401,11 @@ mod limit_tests {
     fn the_totals_stay_arithmetically_exact() {
         let report = report_of(10);
         let limited = limit_groups(report, Some(4));
-        let sum: u64 = limited.groups.iter().map(|group| group.reclaimable_bytes).sum();
+        let sum: u64 = limited
+            .groups
+            .iter()
+            .map(|group| group.reclaimable_bytes)
+            .sum();
         assert_eq!(sum, limited.total_reclaimable_bytes);
         let copies: usize = limited.groups.iter().map(|group| group.copies.len()).sum();
         assert_eq!(copies, limited.total_copies);
@@ -404,7 +416,11 @@ mod limit_tests {
         let report = report_of(6);
         let limited = limit_groups(report, Some(2));
         for kept in &limited.groups {
-            assert_eq!(kept.copies.len(), 2, "one original plus one reclaimable copy");
+            assert_eq!(
+                kept.copies.len(),
+                2,
+                "one original plus one reclaimable copy"
+            );
         }
     }
 }
@@ -674,7 +690,10 @@ mod tests {
             confidence: "hash".to_string(),
         }];
         retain_existing(&mut groups);
-        assert!(groups.is_empty(), "a group with fewer than two real copies is dropped");
+        assert!(
+            groups.is_empty(),
+            "a group with fewer than two real copies is dropped"
+        );
     }
 
     #[test]

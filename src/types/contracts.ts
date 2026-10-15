@@ -390,8 +390,12 @@ export interface CleanupPlanItem {
 export interface CleanupPlan {
   scanId: string | null;
   items: CleanupPlanItem[];
-  /** Simulates every action and reports exactly what would happen. */
+  /** True means no mutation is possible, including through cleanupExecute. */
   dryRun: boolean;
+  /** One-use token issued by the native preview for these exact files and actions. */
+  confirmationToken?: string | null;
+  /** Set only after the user explicitly confirms the preview. */
+  confirmed?: boolean;
 }
 
 export interface CleanupPreviewItem {
@@ -420,6 +424,8 @@ export interface CleanupPreview {
   totalPathCount: number;
   /** Non-fatal problems found while simulating. */
   warnings: string[];
+  /** Null when any selected path is unsafe, or in the synthetic browser demo. */
+  confirmationToken: string | null;
 }
 
 export interface CleanupResultItem {

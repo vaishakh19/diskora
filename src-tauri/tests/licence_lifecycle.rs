@@ -83,7 +83,12 @@ fn verify_case_on(name: &str, device: Option<&str>) -> Result<LicensePayload, Li
     let vectors = vectors();
     let key = vectors["cases"][name]["key"].as_str().unwrap();
     let parsed = payload::parse(key)?;
-    payload::verify(&parsed, &config(&vectors), vectors["now"].as_i64().unwrap(), device)
+    payload::verify(
+        &parsed,
+        &config(&vectors),
+        vectors["now"].as_i64().unwrap(),
+        device,
+    )
 }
 
 #[test]
@@ -116,7 +121,12 @@ fn a_modified_payload_is_refused() {
 #[test]
 fn a_licence_signed_by_an_untrusted_key_is_refused() {
     let error = verify_case("wrongKey").expect_err("refused");
-    assert_eq!(error, LicenseError::UnknownKey { key_id: "k-other".to_string() });
+    assert_eq!(
+        error,
+        LicenseError::UnknownKey {
+            key_id: "k-other".to_string()
+        }
+    );
 }
 
 #[test]
@@ -131,8 +141,11 @@ fn a_licence_for_the_wrong_product_is_refused() {
 #[test]
 fn a_licence_bound_to_another_device_is_refused() {
     let vectors = vectors();
-    let error = verify_case_on("wrongDevice", Some(vectors["deviceBinding"].as_str().unwrap()))
-        .expect_err("refused");
+    let error = verify_case_on(
+        "wrongDevice",
+        Some(vectors["deviceBinding"].as_str().unwrap()),
+    )
+    .expect_err("refused");
     assert!(
         matches!(&error, LicenseError::WrongDevice { .. }),
         "expected a wrong-device error, got {error:?}"
@@ -178,8 +191,8 @@ fn a_lapsed_offline_lease_is_refused() {
 #[test]
 fn a_live_offline_lease_is_accepted() {
     let vectors = vectors();
-    let parsed = payload::parse(vectors["cases"]["liveLease"]["key"].as_str().unwrap())
-        .expect("parses");
+    let parsed =
+        payload::parse(vectors["cases"]["liveLease"]["key"].as_str().unwrap()).expect("parses");
     let verified = payload::verify(
         &parsed,
         &config(&vectors),
@@ -235,11 +248,14 @@ fn every_error_message_is_safe_to_show_a_customer() {
                 "{name} leaked an internal field: {message}"
             );
             assert!(
-                !message.contains("src-tauri") && !message.contains('\\') && !message.contains(".rs"),
+                !message.contains("src-tauri")
+                    && !message.contains('\\')
+                    && !message.contains(".rs"),
                 "{name} leaked a path: {message}"
             );
             assert!(
-                !message.to_lowercase().contains("panic") && !message.to_lowercase().contains("stack"),
+                !message.to_lowercase().contains("panic")
+                    && !message.to_lowercase().contains("stack"),
                 "{name} leaked internals: {message}"
             );
         }
@@ -251,7 +267,8 @@ fn every_error_message_is_safe_to_show_a_customer() {
 #[test]
 fn a_verified_licence_resolves_to_an_active_paid_entitlement() {
     let vectors = vectors();
-    let parsed = payload::parse(vectors["cases"]["valid"]["key"].as_str().unwrap()).expect("parses");
+    let parsed =
+        payload::parse(vectors["cases"]["valid"]["key"].as_str().unwrap()).expect("parses");
     let verified = payload::verify(
         &parsed,
         &config(&vectors),
@@ -259,7 +276,10 @@ fn a_verified_licence_resolves_to_an_active_paid_entitlement() {
         None,
     )
     .expect("verifies");
-    let tier = config(&vectors).tier(&verified.tier_id).cloned().expect("a tier");
+    let tier = config(&vectors)
+        .tier(&verified.tier_id)
+        .cloned()
+        .expect("a tier");
     let entitlement = entitlement_from_payload(
         &verified,
         &tier,
@@ -270,10 +290,22 @@ fn a_verified_licence_resolves_to_an_active_paid_entitlement() {
     assert_eq!(entitlement.state, EntitlementState::ProActive);
     // The flag names are the shared contract's. Paid cleanup and permanent deletion both hang off
     // `customCleanupRules`; duplicate removal hangs off `advancedDuplicates`.
-    assert!(entitlement.features.custom_cleanup_rules, "cleanup is unlocked");
-    assert!(entitlement.features.advanced_duplicates, "duplicate removal is unlocked");
-    assert!(entitlement.features.export_reports, "report export is unlocked");
-    assert!(entitlement.features.scan_history, "scan history is unlocked");
+    assert!(
+        entitlement.features.custom_cleanup_rules,
+        "cleanup is unlocked"
+    );
+    assert!(
+        entitlement.features.advanced_duplicates,
+        "duplicate removal is unlocked"
+    );
+    assert!(
+        entitlement.features.export_reports,
+        "report export is unlocked"
+    );
+    assert!(
+        entitlement.features.scan_history,
+        "scan history is unlocked"
+    );
     assert!(entitlement.permanent, "a one-time purchase is permanent");
     assert!(entitlement.license_id.is_some());
     assert_eq!(entitlement.device_limit, 3);
@@ -288,9 +320,13 @@ fn a_lapsed_lease_on_a_permanent_licence_is_not_revocation() {
     // offline re-validation lease is time-limited.
     let vectors = vectors();
     let now = vectors["now"].as_i64().unwrap();
-    let parsed = payload::parse(vectors["cases"]["valid"]["key"].as_str().unwrap()).expect("parses");
+    let parsed =
+        payload::parse(vectors["cases"]["valid"]["key"].as_str().unwrap()).expect("parses");
     let mut verified = payload::verify(&parsed, &config(&vectors), now, None).expect("verifies");
-    let tier = config(&vectors).tier(&verified.tier_id).cloned().expect("a tier");
+    let tier = config(&vectors)
+        .tier(&verified.tier_id)
+        .cloned()
+        .expect("a tier");
 
     // A permanent licence carries no lease at all, so it cannot lapse.
     let entitlement = entitlement_from_payload(&verified, &tier, &config(&vectors), now);
@@ -308,10 +344,13 @@ fn a_lapsed_lease_on_a_permanent_licence_is_not_revocation() {
 fn offline_grace_expires_a_non_permanent_licence_but_says_the_purchase_is_unaffected() {
     let vectors = vectors();
     let now = vectors["now"].as_i64().unwrap();
-    let parsed = payload::parse(vectors["cases"]["liveLease"]["key"].as_str().unwrap())
-        .expect("parses");
+    let parsed =
+        payload::parse(vectors["cases"]["liveLease"]["key"].as_str().unwrap()).expect("parses");
     let verified = payload::verify(&parsed, &config(&vectors), now, None).expect("verifies");
-    let tier = config(&vectors).tier(&verified.tier_id).cloned().expect("a tier");
+    let tier = config(&vectors)
+        .tier(&verified.tier_id)
+        .cloned()
+        .expect("a tier");
 
     // Inside the lease.
     let inside = entitlement_from_payload(&verified, &tier, &config(&vectors), now);
@@ -400,8 +439,14 @@ fn the_free_tier_is_a_complete_product() {
     // Everything the free permission set covers is on: scanning, inspection, previews, the large
     // file finder and basic duplicate detection.
     assert!(entitlement.features.core_analysis, "scanning is free");
-    assert!(!entitlement.features.custom_cleanup_rules, "cleanup is paid");
-    assert!(!entitlement.features.advanced_duplicates, "duplicate removal is paid");
+    assert!(
+        !entitlement.features.custom_cleanup_rules,
+        "cleanup is paid"
+    );
+    assert!(
+        !entitlement.features.advanced_duplicates,
+        "duplicate removal is paid"
+    );
     assert!(!entitlement.features.export_reports, "export is paid");
     assert!(!entitlement.features.scan_history, "scan history is paid");
     assert!(!entitlement.permanent);
@@ -419,7 +464,9 @@ fn the_device_limit_travels_in_the_signed_payload() {
     assert_eq!(auth.device_limit(), 3);
 
     // A payload claiming an absurd limit is refused before the limit is ever read.
-    let absurd = vectors["cases"]["absurdDeviceLimit"]["key"].as_str().unwrap();
+    let absurd = vectors["cases"]["absurdDeviceLimit"]["key"]
+        .as_str()
+        .unwrap();
     let auth = Authorization::resolve(Some(absurd), &config(&vectors), now, device());
     assert!(!auth.is_paid());
     // With no payload, the limit defaults to one: the most conservative value.
@@ -468,7 +515,11 @@ fn the_clock_is_milliseconds_since_the_epoch() {
 fn the_fixture_declares_every_case_it_contains() {
     let vectors = vectors();
     let cases = vectors["cases"].as_object().expect("an object");
-    assert!(cases.len() >= 12, "expected at least a dozen cases, found {}", cases.len());
+    assert!(
+        cases.len() >= 12,
+        "expected at least a dozen cases, found {}",
+        cases.len()
+    );
     for (name, case) in cases {
         assert!(
             case["expect"].is_string(),

@@ -116,7 +116,7 @@ jobs:
           source = open('src-tauri/src/config/product.rs', encoding='utf-8').read()
           # Only the shipped configuration, not the deliberately-broken values in the unit tests,
           # which live in the `#[cfg(test)]` module further down the file.
-          start = source.index('pub const DEFAULT_CONFIG')
+          start = source.index('pub static DEFAULT_CONFIG')
           end = source.index('#[cfg(test)]', start)
           block = source[start:end]
           keys = re.findall(r'public_key_base64:\s*"([^"]+)"', block)
@@ -188,6 +188,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Create Supabase-like roles for RPC privilege checks
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d diskwise_test -v ON_ERROR_STOP=1 <<'SQL'
+          create role anon nologin;
+          create role authenticated nologin;
+          create role service_role nologin;
+          SQL
+
       - name: Apply every migration in order
         env:
           PGPASSWORD: postgres
@@ -227,6 +237,36 @@ jobs:
 
           -- Re-activating the first device must succeed and consume no extra slot.
           select activate_device((select id from licences where signing_key_id = 'k-test'), 'dev-aaaaaaaa', 'CI', 'windows', 3);
+          SQL
+
+      - name: Confirm SECURITY DEFINER RPCs are service-role only
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d diskwise_test -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          declare
+            total integer;
+            restricted integer;
+          begin
+            select count(*), count(*) filter (where
+              not has_function_privilege('anon', p.oid, 'EXECUTE')
+              and not has_function_privilege('authenticated', p.oid, 'EXECUTE')
+              and has_function_privilege('service_role', p.oid, 'EXECUTE')
+              and not exists (
+                select 1 from aclexplode(p.proacl) acl
+                where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+              ))
+            into total, restricted
+            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.proname in (
+              'active_device_count', 'activate_device', 'deactivate_device',
+              'claim_webhook', 'finish_webhook', 'rate_limit_hit'
+            );
+            if total <> 6 or restricted <> 6 then
+              raise exception 'RPC privileges unsafe: % functions, % restricted', total, restricted;
+            end if;
+          end $$;
           SQL
 
       - name: Confirm no client write policy exists

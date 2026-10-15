@@ -193,11 +193,9 @@ impl Database {
     pub fn load_settings(&self) -> Result<Option<String>, String> {
         let connection = self.lock()?;
         connection
-            .query_row(
-                "SELECT payload FROM settings WHERE id = 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
+            .query_row("SELECT payload FROM settings WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            })
             .optional()
             .map_err(|error| error.to_string())
     }
@@ -344,7 +342,10 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_entitlement_events(&self, limit: usize) -> Result<Vec<EntitlementEventRow>, String> {
+    pub fn list_entitlement_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<EntitlementEventRow>, String> {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
@@ -366,7 +367,6 @@ impl Database {
             .map_err(|error| error.to_string())?;
         Ok(rows)
     }
-
 
     /* ------------------------------ licence key ------------------------------ */
 
@@ -788,10 +788,16 @@ mod tests {
         let database = Database::open(&path).unwrap();
         assert!(database.load_license_key().unwrap().is_none());
         database.save_license_key("abc.def").unwrap();
-        assert_eq!(database.load_license_key().unwrap().as_deref(), Some("abc.def"));
+        assert_eq!(
+            database.load_license_key().unwrap().as_deref(),
+            Some("abc.def")
+        );
         // Overwrite.
         database.save_license_key("ghi.jkl").unwrap();
-        assert_eq!(database.load_license_key().unwrap().as_deref(), Some("ghi.jkl"));
+        assert_eq!(
+            database.load_license_key().unwrap().as_deref(),
+            Some("ghi.jkl")
+        );
         database.clear_license_key().unwrap();
         assert!(database.load_license_key().unwrap().is_none());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -820,7 +826,10 @@ mod tests {
 
         // Deactivating one frees a slot but keeps the row for the audit trail.
         assert!(database.deactivate_device("dev-0", 2000).unwrap());
-        assert!(!database.deactivate_device("dev-0", 2000).unwrap(), "already inactive");
+        assert!(
+            !database.deactivate_device("dev-0", 2000).unwrap(),
+            "already inactive"
+        );
         assert_eq!(database.active_device_count().unwrap(), 2);
         assert_eq!(database.active_device_activations().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

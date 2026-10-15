@@ -76,6 +76,7 @@ export interface Toast {
 
 export interface AppState {
   ready: boolean;
+  bootstrapError: string | null;
   route: Route;
   transportKind: BackendTransport['kind'];
   canMutate: boolean;
@@ -153,6 +154,7 @@ export interface AppState {
 
 const initialState: AppState = {
   ready: false,
+  bootstrapError: null,
   route: 'home',
   transportKind: 'demo',
   canMutate: false,
@@ -210,6 +212,7 @@ const initialState: AppState = {
 
 type Action =
   | { type: 'ready'; kind: BackendTransport['kind']; canMutate: boolean }
+  | { type: 'bootstrap-error'; message: string }
   | { type: 'app-version'; version: AppVersion }
   | { type: 'route'; route: Route }
   | { type: 'drives'; drives: DriveInfo[] }
@@ -265,7 +268,9 @@ type Action =
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'ready':
-      return { ...state, ready: true, transportKind: action.kind, canMutate: action.canMutate };
+      return { ...state, ready: true, bootstrapError: null, transportKind: action.kind, canMutate: action.canMutate };
+    case 'bootstrap-error':
+      return { ...state, bootstrapError: action.message, ready: false, canMutate: false };
     case 'app-version':
       return { ...state, appVersion: action.version };
     case 'route':
@@ -529,7 +534,9 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
       if (events) dispatch({ type: 'entitlement-events', events });
       const system = drives.find((drive) => drive.isSystemDrive) ?? drives[0];
       if (system) dispatch({ type: 'select-drive', driveId: system.id });
-    })();
+    })().catch((error: unknown) => {
+      if (!cancelled) dispatch({ type: 'bootstrap-error', message: describe(error) });
+    });
     return () => {
       cancelled = true;
       scanUnsub.current?.();

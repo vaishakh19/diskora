@@ -17,7 +17,7 @@ npm install            # frontend dependencies
 npm run dev            # browser preview (synthetic data, clearly labelled)
 npm run app:dev        # the real desktop app (requires the Rust toolchain)
 npm run app:build      # attempts MSI + NSIS build on Windows (unverified)
-npm run test:all       # typecheck + frontend tests + licence tests + build
+npm run test:all       # typecheck + frontend/licence/icon tests + build
 npm run bench          # tree aggregation benchmark, prints real measurements
 npm run rust:test      # Rust tests (requires the toolchain)
 ```

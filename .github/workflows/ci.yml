@@ -150,6 +150,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Validate the Windows icon before RC.EXE runs
+        working-directory: .
+        run: npm run test:icons
       - name: Prepare frontend assets for the Tauri build script
         working-directory: .
         run: |

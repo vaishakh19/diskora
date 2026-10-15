@@ -221,13 +221,28 @@ function encodeIco(sizes) {
     entry[3] = 0; // reserved
     entry.writeUInt16LE(1, 4); // colour planes
     entry.writeUInt16LE(32, 6); // bits per pixel
-    entry.writeUInt32BE(image.data.length, 8);
-    entry.writeUInt32BE(offset, 12);
+    // ICO directory entries use little-endian DWORDs. Big-endian lengths/offsets make RC.EXE
+    // reject the icon while compiling the Windows application resources.
+    entry.writeUInt32LE(image.data.length, 8);
+    entry.writeUInt32LE(offset, 12);
     offset += image.data.length;
     entries.push(entry);
   }
 
   return Buffer.concat([header, ...entries, ...images.map((image) => image.data)]);
+}
+
+/** ICNS 512×512 PNG entry (`ic09`), with big-endian lengths as required by the ICNS format. */
+function encodeIcns512() {
+  const png = encodePng(512);
+  const entryLength = 8 + png.length;
+  const header = Buffer.alloc(8);
+  header.write('icns', 0, 'ascii');
+  header.writeUInt32BE(8 + entryLength, 4);
+  const entry = Buffer.alloc(8);
+  entry.write('ic09', 0, 'ascii');
+  entry.writeUInt32BE(entryLength, 4);
+  return Buffer.concat([header, entry, png]);
 }
 
 /* ---------------------------------- main ---------------------------------- */
@@ -241,7 +256,7 @@ const outputs = [
   ['128x128@2x.png', encodePng(256)],
   ['icon.png', encodePng(512)],
   ['icon.ico', encodeIco([16, 24, 32, 48, 64, 128, 256])],
-  ['icon.icns', encodePng(512)],
+  ['icon.icns', encodeIcns512()],
 ];
 
 for (const [name, data] of outputs) {

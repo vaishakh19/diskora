@@ -4,7 +4,8 @@
 npm run typecheck    # TypeScript across src/ and tests/
 npm test             # frontend suite (vitest)
 npm run test:licence # licence lifecycle + webhook signature contract tests
-npm run test:all     # typecheck + frontend + licence + production build
+npm run test:icons   # validate ICO/ICNS structure before Windows resource compilation
+npm run test:all     # typecheck + frontend + licence + icon check + production build
 npm run rust:test    # Rust (needs a toolchain)
 npm run rust:fmt:check # Rust formatting check (does not modify files)
 npm run rust:clippy  # Rust lints, warnings denied
@@ -203,9 +204,11 @@ artifact rather than restating them in a document.
 Be precise: the [16 October CI run](https://github.com/vaishakh19/diskora/actions/runs/38791605145)
 passed frontend, licence contract, dependency scan and **initial PostgreSQL migrations**, and
 `cargo fmt --check` passed on Windows. **Clippy failed** before native tests/build; installers and
-Windows link jobs were skipped. The follow-up [CI run 38793800761](https://github.com/vaishakh19/diskora/actions/runs/38793800761)
+Windows link jobs were skipped. The follow-up [CI run 38795343384](https://github.com/vaishakh19/diskora/actions/runs/38795343384)
 also passed all migrations including webhook retry migration `0004` and its assertions against
-real PostgreSQL 17. Its Windows Rust job must still be inspected separately.
+real PostgreSQL 17. Its Windows Rust job identified an `RC.EXE` resource compilation failure;
+`npm run test:icons` catches the invalid ICO directory locally after the generator fix, but a new
+Windows run must prove resource compilation before any native test/bundle claim.
 
 - No local Cargo toolchain is available. No successful native compilation, Rust scanner/cleanup
   test, Clippy check, installer build, install/uninstall or real NTFS scan has been verified.

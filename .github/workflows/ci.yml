@@ -181,9 +181,13 @@ jobs:
           # annotations to diagnose build-script panics as well as compiler errors. Include the
           # final non-newline-terminated line and leave ANSI coloring off for readable messages.
           if ! cargo clippy --all-targets --message-format=short -- -D warnings >clippy.log 2>&1; then
-            tail -35 clippy.log | while IFS= read -r line || [ -n "$line" ]; do
+            # GitHub exposes only a small number of annotations from a step. Filter out normal
+            # `Checking` lines so the API shows the actual compiler/build-script diagnostics.
+            matches=$(grep -Ei 'error|warning|panicked|failed|caused by' clippy.log | tail -8 || true)
+            if [ -z "$matches" ]; then matches=$(tail -8 clippy.log); fi
+            while IFS= read -r line || [ -n "$line" ]; do
               [ -z "$line" ] || printf '::error::%s\n' "$line"
-            done
+            done <<< "$matches"
             echo '::error::Clippy failed; full diagnostics are in the job log.'
             exit 1
           fi

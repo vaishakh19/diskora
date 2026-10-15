@@ -11,10 +11,12 @@
 //! Online re-validation is intentionally opt-in and off by default; nothing here phones home.
 
 pub mod keys;
+pub mod payload;
 pub mod verify;
 
 pub use keys::{public_key, LICENSE_PUBLIC_KEY_BASE64};
+pub use payload::LicensePayload;
 pub use verify::{
-    entitlement_from_license, free_entitlement, Entitlement, EntitlementState, FeatureFlags,
-    LicensePayload, PlanTier,
+    entitlement_from_payload, free_entitlement, Entitlement, EntitlementState, FeatureFlags,
+    PlanTier,
 };

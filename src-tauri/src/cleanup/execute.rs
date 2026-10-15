@@ -570,7 +570,7 @@ fn act(path: &Path, action: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::aggregate::{ScanIndex, OTHER_NODE_SUFFIX};
+    use crate::scanner::aggregate::ScanIndex;
     use crate::scanner::walker::ScanOptions;
     use std::fs;
     use std::sync::Arc;

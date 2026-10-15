@@ -20,7 +20,9 @@ use crate::authz::Authorization;
 use crate::config::product::DEFAULT_CONFIG;
 use crate::error::{AppError, AppResult};
 use crate::licensing::payload;
-use crate::licensing::verify::{self, Entitlement, EntitlementState};
+#[cfg(test)]
+use crate::licensing::verify::EntitlementState;
+use crate::licensing::verify::{self, Entitlement};
 use crate::state::AppState;
 
 /// Mirrors `EntitlementEvent`.
@@ -271,7 +273,9 @@ pub fn device_deactivate(
 fn active_devices(state: &AppState) -> AppResult<Vec<crate::storage::db::DeviceActivationRow>> {
     let guard = state.database()?;
     match guard.as_ref() {
-        Some(database) => database.active_device_activations(),
+        Some(database) => database
+            .active_device_activations()
+            .map_err(AppError::Database),
         None => Ok(Vec::new()),
     }
 }

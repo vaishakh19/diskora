@@ -3,7 +3,6 @@
 //! Detection runs on a blocking thread and publishes `duplicates://progress`. The report is kept in
 //! memory; nothing about file contents is ever persisted.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
@@ -138,7 +137,7 @@ pub async fn find_duplicates(
         let state = progress_app.state::<AppState>();
         if let Ok(mut registry) = state.duplicate_reports.lock() {
             registry.insert(progress_id, report);
-        }
+        };
     });
 
     Ok(report_id)

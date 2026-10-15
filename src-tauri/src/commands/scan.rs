@@ -554,8 +554,6 @@ fn build_result(entry: &ScanEntry) -> ScanResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn a_child_page_clamps_its_limit() {
         // Guards against a caller asking for a million rows.

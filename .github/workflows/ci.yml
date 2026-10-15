@@ -9,7 +9,7 @@ name: CI
 #   3. rust             — fmt, clippy, the Rust unit *and* integration tests, cargo check
 #   4. migrations       — the SQL schema applies cleanly to a scratch Postgres
 #   5. installers       — the real Tauri MSI + NSIS bundles, uploaded as artifacts
-#   6. smoke-windows    — a scan of a real NTFS volume on a real runner
+#   6. smoke-windows    — Windows build/link only; real NTFS scan is a manual gate
 #   7. audit            — dependency and secret scanning
 #
 # Nothing here is allowed to pass without running. A job that cannot run on this runner is marked
@@ -156,7 +156,18 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          # Annotate compiler diagnostics: Actions' hosted log download may be unavailable in
+          # restricted environments, but check-run annotations remain accessible through the API.
+          if ! cargo clippy --all-targets --message-format=short -- -D warnings >clippy.log 2>&1; then
+            grep -E '(^|: )(error|warning)(\[|:)' clippy.log | head -40 | while IFS= read -r line; do
+              printf '::error::%s\n' "$line"
+            done
+            echo '::error::Clippy failed; see the job log for the full diagnostics.'
+            exit 1
+          fi
 
       # Unit tests and the integration tests together: `cargo test --all` would skip the
       # `tests/` directory in some layouts, so both targets are named explicitly.
@@ -261,10 +272,66 @@ jobs:
             from pg_proc p join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'public' and p.proname in (
               'active_device_count', 'activate_device', 'deactivate_device',
-              'claim_webhook', 'finish_webhook', 'rate_limit_hit'
+              'claim_webhook', 'finish_webhook', 'rate_limit_hit',
+              'claim_webhook_v2', 'finish_webhook_v2'
             );
-            if total <> 6 or restricted <> 6 then
+            if total <> 8 or restricted <> 8 then
               raise exception 'RPC privileges unsafe: % functions, % restricted', total, restricted;
+            end if;
+          end $$;
+          SQL
+
+      - name: Confirm webhook claims are retriable and bind the signed body
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d diskwise_test -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          declare
+            first_token uuid := gen_random_uuid();
+            retry_token uuid := gen_random_uuid();
+            stale_token uuid := gen_random_uuid();
+            fresh_token uuid := gen_random_uuid();
+            first_hash text := repeat('a', 64);
+          begin
+            if claim_webhook_v2('msg_ci', 'payment.succeeded', first_hash, 1000, first_token) <> 'claimed' then
+              raise exception 'first webhook was not claimed';
+            end if;
+            if claim_webhook_v2('msg_ci', 'payment.succeeded', first_hash, 1001, retry_token) <> 'in-flight' then
+              raise exception 'in-flight webhook was claimed twice';
+            end if;
+            if claim_webhook_v2('msg_ci', 'payment.succeeded', repeat('b', 64), 1002, retry_token) <> 'mismatch' then
+              raise exception 'same id with a different body was accepted';
+            end if;
+            if finish_webhook_v2('msg_ci', retry_token, null, 1003) then
+              raise exception 'the wrong worker was allowed to finish';
+            end if;
+            if not finish_webhook_v2('msg_ci', first_token, 'transient failure', 1004) then
+              raise exception 'failure was not recorded';
+            end if;
+            if claim_webhook_v2('msg_ci', 'payment.succeeded', first_hash, 1005, retry_token) <> 'claimed' then
+              raise exception 'failed webhook could not retry';
+            end if;
+            if finish_webhook_v2('msg_ci', first_token, null, 1006) then
+              raise exception 'first worker overwrote the retry';
+            end if;
+            if not finish_webhook_v2('msg_ci', retry_token, null, 1007) then
+              raise exception 'retry could not finish';
+            end if;
+            if claim_webhook_v2('msg_ci', 'payment.succeeded', first_hash, 1008, gen_random_uuid()) <> 'processed' then
+              raise exception 'processed webhook was claimed again';
+            end if;
+            if claim_webhook_v2('msg_stale', 'refund.succeeded', first_hash, 1000, stale_token) <> 'claimed' then
+              raise exception 'second delivery was not claimed';
+            end if;
+            if claim_webhook_v2('msg_stale', 'refund.succeeded', first_hash, 301001, fresh_token) <> 'claimed' then
+              raise exception 'stale lease could not be recovered';
+            end if;
+            if finish_webhook_v2('msg_stale', stale_token, null, 301002) then
+              raise exception 'stale worker was allowed to finish';
+            end if;
+            if not finish_webhook_v2('msg_stale', fresh_token, null, 301003) then
+              raise exception 'fresh worker could not finish';
             end if;
           end $$;
           SQL
@@ -341,10 +408,9 @@ jobs:
           }
           Write-Host "Installers are unsigned by design. Signing is a separate release task."
 
-  # A scan on a real Windows runner catches regressions unit tests cannot: the walker against a real
-  # NTFS volume, real long paths, real junctions and real permission-denied directories.
+  # Build/link only. A real NTFS scan and install/uninstall test remain manual release gates.
   smoke-windows:
-    name: Windows smoke scan
+    name: Windows link check (no NTFS scan)
     runs-on: windows-latest
     needs: [installers]
     steps:
@@ -360,14 +426,11 @@ jobs:
           npm run build
           cd src-tauri
           cargo build --release
-      - name: Scan the runner's own system drive
+      - name: Declare the limit of this check
         shell: pwsh
         run: |
-          # Exercises the real walker against a real volume with real permission-denied folders.
-          $env:DISKWISE_SMOKE = "1"
-          Write-Host "The Rust test suite already covers cancellation, access-denied, symlink and"
-          Write-Host "long-path handling against temp directories; this job proves the same code"
-          Write-Host "compiles and links on windows-latest."
+          Write-Host "Compiled and linked on Windows. This job did NOT scan a real NTFS volume"
+          Write-Host "or install an MSI/NSIS package; both are manual release blockers."
 
   audit:
     name: Dependency and secret audit
@@ -385,7 +448,6 @@ jobs:
 
       - name: npm audit (high and critical only)
         run: npm audit --audit-level=high
-        continue-on-error: true
 
       - name: Confirm no credential-shaped file is committed
         shell: bash

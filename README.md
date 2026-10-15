@@ -1,5 +1,11 @@
 # Diskwise
 
+> **Release status: NOT READY (16 October 2026).** The browser preview uses synthetic data and
+> refuses destructive actions. The native Windows scanner, cleanup, installer and paid licensing
+> lifecycle have **not** passed their release gates. Live checkout is deliberately disabled; do
+> not enable real sales. See [the release audit](docs/release-audit.md) for verified checks and
+> blockers.
+
 A local-first disk space analyzer for Windows 10 and 11. It maps a whole volume with a real
 sunburst and treemap, finds the files that are actually eating your disk, detects true duplicates
 by content, and explains every cleanup suggestion before anything moves.
@@ -10,7 +16,7 @@ Built with **Tauri 2 + React + TypeScript + Vite + Tailwind CSS + D3 + Rust + SQ
 npm install            # frontend dependencies
 npm run dev            # browser preview (synthetic data, clearly labelled)
 npm run app:dev        # the real desktop app (requires the Rust toolchain)
-npm run app:build      # MSI + NSIS installers
+npm run app:build      # attempts MSI + NSIS build on Windows (unverified)
 npm run test:all       # typecheck + frontend tests + licence tests + build
 npm run bench          # tree aggregation benchmark, prints real measurements
 npm run rust:test      # Rust tests (requires the toolchain)
@@ -26,17 +32,18 @@ npm run rust:test      # Rust tests (requires the toolchain)
 | **Visualize** | Genuine D3 sunburst (one ring per folder level) and squarified treemap, plus a virtualized file list. Click to select, double-click to navigate in, centre click to return to root, right-click for a safe context menu, breadcrumb and full keyboard navigation. |
 | **Large files** | Filter by minimum size (>100 MB / >500 MB / >1 GB / custom), extension and last-modified window; sort largest first; reveal any result in File Explorer. |
 | **Duplicates** | Staged detection: group by exact size → SHA-256 → optional byte-for-byte verification. Never by filename. Inspect groups, compare paths and sizes, select individual copies, exclude folders, see total savings. |
-| **Cleanup** | Suggestions for folders *you* configure, each with its exact paths, byte totals and the reason it was flagged. Explicit confirmation, Recycle Bin by default, permanent deletion as a separate clearly-labelled action. |
-| **Entitlement** | One-time purchase, lifetime licence, three devices. Resolved and enforced in Rust, cached offline. Basic usefulness never requires payment. |
+| **Cleanup** | Scan-derived file suggestions and a preview of exact paths. The native command requires a confirmed Recycle Bin move and paid authorization; permanent deletion is disabled. Windows safety and Recycle Bin behavior remain unverified. The browser demo never deletes anything. |
+| **Entitlement** | A one-time licence and three-device limit are designed, but purchase delivery and activation are incomplete. Live sales are disabled; free core analysis remains available. |
 
 ## Commercial model
 
-One-time purchase. Lifetime entitlement. Three simultaneous device activations. No mandatory
-subscription, and nothing in the app silently expires a licence you paid for.
+The planned model is a one-time purchase with lifetime entitlement and three device activations;
+**it is not for sale yet**. No subscription is implemented. The 30-day offline lease and
+revocation/recovery lifecycle need a verified end-to-end implementation before launch.
 
 | | |
 | --- | --- |
-| Price | **14,999 INR**, one time |
+| Configured price (not available for live purchase) | **₹1,499.00** (149,900 paise), one time |
 | Devices | 3 simultaneous activations, deactivable and transferable |
 | Updates | included for the life of the product |
 | Offline use | a verified licence keeps working with no network for 30 days |
@@ -55,10 +62,8 @@ validated on load.
 - Auto-classify your documents, browser profiles, development dependencies or package caches as junk.
 - Offer Windows system files or application data for deletion.
 - Preselect every copy of a duplicate group — at least one copy is always kept.
-- Upload anything. There is no account, no cloud sync, no background scanning, no full-path analytics,
-  no ads, and no telemetry. The only network requests the app ever makes are the ones you trigger by
-  activating, deactivating or recovering a licence, and they carry the licence key, a device binding
-  and a device name — nothing about your filesystem.
+- Upload scan paths or file contents. Core analysis is local; the licensing service is not yet
+  wired end-to-end. Any future network functionality needs a separate privacy review and tests.
 - Trust the frontend as a security boundary. Every paid or destructive capability is gated inside
   Rust, before the operation runs, against an entitlement the backend resolved itself. A modified
   React interface cannot bypass it, and a forged licence cannot unlock a paid command.

@@ -6,7 +6,7 @@ npm test             # frontend suite (vitest)
 npm run test:licence # licence lifecycle + webhook signature contract tests
 npm run test:all     # typecheck + frontend + licence + production build
 npm run rust:test    # Rust (needs a toolchain)
-npm run rust:fmt     # Rust formatting check
+npm run rust:fmt:check # Rust formatting check (does not modify files)
 npm run rust:clippy  # Rust lints, warnings denied
 npm run bench        # tree aggregation benchmark, prints real measurements
 ```
@@ -18,8 +18,8 @@ frontend and the licence contract.
 
 ## What the frontend suite covers
 
-`npx vitest run` — 10 files, 168 tests, all running in jsdom against the real components and the
-real reducer. No component is mocked out.
+`npx vitest run` — 179 tests on 16 October 2026, running in jsdom against the React components,
+state reducer, transport seam and synthetic demo backend. This is **not** a Windows native test.
 
 | File | Tests | What it proves |
 | --- | --- | --- |
@@ -28,10 +28,11 @@ real reducer. No component is mocked out.
 | `src/lib/categories.test.ts` | 10 | Every `--color-cat-*` token in `src/styles.css` has a matching entry in `CATEGORY_COLORS`, so the sunburst can never render an undefined colour. |
 | `src/lib/tree.test.ts` | 15 | Pruning: `maxChildrenPerNode`, the synthetic `Other` node, node budget, the monotonicity the depth search depends on, and that a pruned tree's sizes stay arithmetically exact. |
 | `src/features/visualization/layout.test.ts` | 24 | Sunburst arc paths and treemap tiles, zero-byte and empty-tree handling, category breakdown, sorting. |
-| `src/features/licensing/entitlements.test.ts` | 24 | Every entitlement state maps to the right feature set, transitions are legal, key masking, offline grace, duplicate-group limits. |
+| `src/features/licensing/entitlements.test.ts` | 27 | Every entitlement state maps to the right feature set, transitions are legal, key masking, offline grace, duplicate-group limits. |
 | `src/features/scanner/quickWins.test.ts` | 11 | Quick Wins are derived from the real scan tree (downloads, temp, caches, large media, dev artifacts), sorted by size, and never double-counted. |
 | `src/lib/backend/demo/demoFs.test.ts` | 10 | The synthetic dataset is deterministic, has no duplicate paths, and its sizes add up at every level. |
 | `src/lib/backend/demo/demoTransport.test.ts` | 32 | The browser fallback honours the same contract as the Rust backend, labels itself honestly, refuses destructive operations, and gates features without ever blocking a scan. |
+| `src/lib/transport.test.ts` | 6 | Packaged origins without an injected native bridge fail closed; browser localhost keeps the explicitly synthetic demo. |
 | `src/app/App.test.tsx` | 6 | The whole shell in jsdom: navigation between every route, honest empty states, a full scan lifecycle through the demo transport, and selection syncing from the file list into the details panel. |
 
 The App tests are the closest thing to an end-to-end test that can run without Windows: they render
@@ -188,9 +189,9 @@ artifact rather than restating them in a document.
 | `frontend` | `ubuntu-latest` | `npm ci`, `npm run typecheck`, `npm test`, `npm run build`, then greps `dist/` for secret-shaped strings. |
 | `licence` | `ubuntu-latest` | Regenerates the shared licence vectors and fails if they are stale, runs the 31 contract tests, and asserts the shipped trusted key is still the documented placeholder. |
 | `rust` | `windows-latest` | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib --tests`, `cargo test --test licence_lifecycle`, `cargo check --all-targets`. |
-| `migrations` | `ubuntu-latest` + Postgres 17 | Applies every migration in order, then asserts against a real database that the device limit is enforced atomically, that RLS is on every licensing table, and that no client write policy exists. |
+| `migrations` | `ubuntu-latest` + Postgres 17 | Applies every migration in order; asserts device limits, RLS, no client write policies, service-only SECURITY DEFINER RPCs, and webhook retry/duplicate behavior. |
 | `installers` | `windows-latest` | `npm run app:build`, uploads the MSI and NSIS artefacts, and **fails** if either reports a signature — the release process expects unsigned artefacts. |
-| `smoke-windows` | `windows-latest` | Builds the app on a real Windows runner so linker and WebView2 issues surface in CI rather than at release time. |
+| `smoke-windows` | `windows-latest` | Build/link only; does **not** scan a real NTFS volume or install an installer. Manual release gates remain. |
 | `audit` | `ubuntu-latest` | `npm audit` at high severity, and a scan of the tracked code for credential-shaped strings. |
 
 `RUSTFLAGS: -D warnings` is set repo-wide, so a new warning fails the build.
@@ -199,28 +200,22 @@ artifact rather than restating them in a document.
 
 ## What is *not* verified, and why
 
-Being precise about this matters more than a green badge.
+Be precise: the [16 October CI run](https://github.com/vaishakh19/diskora/actions/runs/38791605145)
+passed frontend, licence contract, dependency scan and **initial PostgreSQL migrations**, and
+`cargo fmt --check` passed on Windows. **Clippy failed** before the native tests/build; installer
+and Windows link jobs were skipped. The new webhook migration `0004` and retry assertions have
+only run in PGlite with a `pgcrypto` substitution; they await the next real-Postgres CI run.
 
-1. **The Rust code has never been compiled.** The environment this repository was authored in has no
-   Rust toolchain and no reachable crates.io mirror. The Rust source is written carefully and
-   reviewed, but "it compiles" is a claim only `cargo build` on Windows can make. CI is that gate.
-2. **The Rust tests have never been run.** Same reason. `src-tauri/tests/licence_lifecycle.rs` and
-   the `src-tauri/src/bin/bench.rs` measurements are written and reviewed, not executed here.
-3. **The Supabase migrations and Edge Functions have never been executed.** There is no network
-   access to Supabase and no Dodo credentials in the authoring environment. They are written against
-   the verified official documentation, and CI's `migrations` job applies the SQL to a real Postgres
-   and asserts the device-limit guarantee. The Edge Functions themselves are covered by
-   `npm run test:licence` for their shared signing and verification code, and by a documented manual
-   run in [`licensing.md`](licensing.md).
-2. **The installers have never been produced.** `npm run app:build` needs both a Rust toolchain and
-   Windows; the documented commands in [`installer.md`](installer.md) are the way to produce them.
-3. **No installer is code-signed, and none claims to be.** Signing is a separate release task with
-   its own key custody; nothing in this repository pretends otherwise.
-4. **No scan has run against a real multi-terabyte volume here.** The walker's correctness is
-   covered by tests against generated temp trees; its throughput on real hardware is not.
-5. **The reference screenshot's exact visual identity is not reproduced.** The aesthetic direction
-   (radial usage visualization, compact sidebars, details panel, premium minimalism) is followed;
-   none of its branding or assets are copied.
+- No local Cargo toolchain is available. No successful native compilation, Rust scanner/cleanup
+  test, Clippy check, installer build, install/uninstall or real NTFS scan has been verified.
+- A syntactic esbuild transpilation and Node shared-signature tests are **not** a deployed Supabase
+  Edge Function or live Dodo checkout/refund test. Live payments are blocked while delivery,
+  activation, provider verification and recovery are incomplete.
+- Rust aggregation benchmark numbers above were previously measured on a different environment;
+  **not** a Windows volume/NTFS throughput result. Real-volume speed and low-RAM behavior remain
+  unknown.
+- No signing certificate is provided; even if CI eventually produces unsigned MSI/NSIS bundles,
+  Authenticode signing, SmartScreen, upgrade/uninstall and first-launch safety require manual gates.
 
 ### How to verify the completed portions yourself
 

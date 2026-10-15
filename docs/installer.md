@@ -1,6 +1,11 @@
 # Windows installers
 
-Diskwise ships two installers, both configured in `src-tauri/tauri.conf.json`:
+> **Release blocker:** neither MSI nor NSIS has been successfully built, installed, launched or
+> uninstalled in the current release audit. The Windows Rust CI job failed before bundling; there
+> are no verified installer artifacts or signing credentials. The settings below describe the
+> **intended Tauri bundles**, not tested shipping behavior.
+
+Diskwise is configured for two installers in `src-tauri/tauri.conf.json`:
 
 ```json
 "bundle": {
@@ -40,7 +45,7 @@ service, a scheduled task or a browser extension.
 | Tool | Version | Notes |
 | --- | --- | --- |
 | Node.js | ≥ 20.19 | `npm install` first |
-| Rust (stable) | ≥ 1.77 | `rustup default stable` |
+| Rust (stable) | ≥ 1.80 | `rustup default stable` (matches `src-tauri/Cargo.toml`) |
 | Microsoft C++ Build Tools | current | required by the `bundled` SQLite feature |
 | WebView2 runtime | any | the NSIS bootstrapper downloads it if absent |
 

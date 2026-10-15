@@ -1,6 +1,14 @@
 # Licensing and entitlement
 
-Diskwise is freemium and sold as a **one-time purchase**. Two rules shape everything below:
+> **Not for live sales.** As of 16 October 2026, paid checkout/issuance is incomplete and
+> `create-checkout` rejects all non-test environments. The webhook does not acknowledge live
+> `payment.succeeded`, and it issues **no licences**. Previously the webhook generated a random
+> opaque key, stored only its hash and never delivered or signed a desktop-usable payload. Native
+> activation does not yet connect purchase credentials to the service. All live purchase, delivery,
+> refund and recovery instructions below are design goals, **not verified working features**. See
+> [the release audit](release-audit.md).
+
+The *planned* model is freemium with a **one-time purchase**. Two rules shape the design:
 
 1. **Basic usefulness never requires payment.** Scanning, visualization, the large-file finder, basic
    duplicate detection and every safety guarantee work forever with no account and no internet
@@ -12,18 +20,23 @@ Diskwise is freemium and sold as a **one-time purchase**. Two rules shape everyt
 
 ## 1. The commercial model
 
-One purchase, one licence, lifetime entitlement. There is **no mandatory subscription**.
+One purchase, one licence, lifetime entitlement is the proposed model. **No live purchase is enabled.**
 
 | | |
 | --- | --- |
 | Product | Diskwise Pro |
 | Tier | `pro-lifetime` |
-| Price | **14,999 INR** (1,499.00 in the smallest currency unit) |
-| Payment | One-time, through Dodo Payments |
+| Configured price | **₹1,499.00** (149,900 paise), not offered for live sale |
+| Payment | Planned one-time purchase through Dodo Payments; live checkout disabled |
 | Devices | **3 simultaneous activations** |
 | Entitlement | Permanent — it never expires |
 | Updates | Included for the life of the product |
-| Offline lease | 30 days (see §4) |
+| Offline lease | 30 days configured, but not enforced end-to-end (see §4) |
+
+The current signed-payload builder can emit `leaseUntil: null` for a permanent tier. The 30-day
+revocation window therefore **cannot be claimed as enforced** until the server signs a bounded
+per-device lease and the native client refreshes it. The entitlement is permanent; a renewable
+validation lease is not the purchase itself.
 
 Those numbers live in exactly **one** place: `src-tauri/src/config/product.rs` (`DEFAULT_CONFIG`),
 with the server-side twin in `supabase/migrations/0002_rls_and_functions.sql`. Nothing else in the
@@ -86,9 +99,9 @@ src-tauri/src/
 The frontend **reads** the entitlement object so it can render the right UI. It never decides
 anything. Specifically:
 
-- `cleanup_execute` calls `authorize(PaidCleanup)` first, then `authorize(PermanentDeletion)` for
-  any item that bypasses the Recycle Bin, then `authorize(BulkFileOperations)` past 50 paths — all
-  inside the native backend, before a single path is prepared.
+- `cleanup_execute` rejects permanent deletion, verifies a one-use preview ticket for an exact set
+  of scanned file paths and calls `authorize(PaidCleanup)`/`authorize(BulkFileOperations)` inside
+  Rust. Browser-demo execution always refuses; Windows native safety still needs tests.
 - `find_duplicates` applies the free group limit inside the blocking worker that builds the report.
 - The executor's approved-roots check does not consult the entitlement at all: it is a filesystem
   safety property, not a commercial one, and it applies to every tier.
@@ -248,43 +261,49 @@ verified against the current official documentation:
 - The documentation is explicit that **the browser redirect is not the source of truth** — the
   webhook is.
 
-Checkout creation is `POST https://test.dodopayments.com/checkouts` (test) or
-`https://live.dodopayments.com/checkouts` (live), with `Authorization: Bearer $DODO_PAYMENTS_API_KEY`
-and a body of `{product_cart, customer, return_url, metadata}`. The response is
-`{session_id, checkout_url}`.
+Test checkout calls Dodo's test endpoint with a server-built cart. **Live checkout returns 503**;
+no production payment should be taken until the signed-device-grant lifecycle, customer delivery,
+provider-product/amount verification and reconciliation have been tested with the real provider.
 
 ### Idempotency and duplicate delivery
 
-Every delivery is claimed by its `webhook-id` **before** any work happens:
+The handler verifies the signature, then uses `claim_webhook_v2` in migration `0004`:
 
-1. `claim_webhook` inserts the id; a conflict means this exact delivery has been seen.
-2. A duplicate is acknowledged with `2xx {received: true, duplicate: true}` and does nothing.
-3. A delivery that reuses an id with a **different** body has a different `body_hash` and is refused,
-   not silently ignored.
-4. The response goes out **before** processing, because Dodo's timeout is shorter than the work and a
-   timeout causes another retry.
+1. A new id/body is claimed with an attempt token. A different body using the same id is refused.
+2. An *already finished* identical delivery gets `2xx {duplicate: true}`; a still-running delivery
+   gets 503, so the provider retries rather than silently losing work.
+3. A failed claim is retriable immediately; a crashed worker's claim can be retried after a five-minute
+   lease. Only the worker holding the current token may mark it finished.
+4. Processing and `finish_webhook_v2` must both succeed **before** the 2xx response. Retries can
+   repeat intermediate writes, so each paid mutation still needs its own idempotency key.
 
-On the granting path, `orders.provider_payment_id` is unique and `licences.order_id` is unique, so a
-replayed `payment.succeeded` — even with a fresh webhook id — cannot create a second order or a
-second licence for the same payment.
+The old boolean claim functions remain present for a staged deployment but must not be called by
+new code. These SQL semantics have been exercised in PGlite and are checked in the PostgreSQL CI
+workflow; **no Dodo delivery has been executed against a deployed Edge Function**.
 
 ### Test mode cannot grant a production entitlement
 
-Three independent guards:
+The shipped `DEFAULT_CONFIG` has `environment: Test` and an all-zero placeholder trusted key,
+checked by CI. The checkout function reads `DODO_ENVIRONMENT` on the server and refuses any value
+other than `test`. Signed test-mode payments with explicit `environment: test` metadata can be
+recorded as test orders, but **the webhook creates no licence in either environment**. Live or
+unknown-environment successes return 503 without claiming the delivery, so operations can reconcile
+any earlier live payment instead of mistaking an undeliverable key for fulfilment.
 
-1. The shipped `DEFAULT_CONFIG` has `environment: Test`. A build straight off the default branch
-   mints nothing, and a CI job asserts the trusted key is still the documented all-zero placeholder.
-2. `create-checkout` reads `DODO_ENVIRONMENT` and never accepts it from the request.
-3. The webhook handler checks the payment's `environment` metadata: a non-live payment is recorded
-   in `orders` for the audit trail and **no licence is issued**.
-
-Switching to live mode is a deliberate, reviewed release action — see §9.
+**Changing an environment variable alone cannot enable live sales.** The required engineering and
+external verification are listed in §9.
 
 ---
 
 ## 6. Refunds, chargebacks and revocation
 
-| Event | Effect |
+**Design, not a deployment guarantee.** The handler now returns 503 if a revocation cannot find
+its order, validate its refund id/amount, or persist every write; it never acknowledges a failed
+revocation as complete. Dodo's actual refund/dispute payload shapes, partial-refund policy,
+concurrent delivery order and real Supabase Edge deployment still need end-to-end tests and
+operator reconciliation. Do not sell live licences until those checks pass.
+
+| Event | Intended effect |
 | --- | --- |
 | `refund.succeeded` | A `refunds` row, the order moves to `refunded`, the licence moves to `refunded` with `status_reason = 'refund'`, and a `revocations` row records why. |
 | `dispute.accepted` / `dispute.lost` | Same, with `source = 'dispute'`. |
@@ -412,21 +431,31 @@ Use the test-mode checkout, complete the payment, and watch `dodo-webhook` in th
 `node scripts/licence-keys.mjs mint --device <binding>` using a throwaway key pair, and verify it
 with `node scripts/licence-keys.mjs verify`.
 
-### Switching to live mode
+### Switching to live mode — BLOCKED
 
-This is the one change that turns test payments into real entitlements. Do all of it, in order:
+**Do not set `DODO_ENVIRONMENT=live` and accept payments yet.** The current checkout deliberately
+returns 503 for non-test environments and the webhook will not acknowledge a live payment success.
+This is a release blocker, not an operator toggle. Before any code change removes those guards:
 
-1. Generate a **new** signing key pair. Do not reuse the test key.
-2. Put the new public key in `CommercialConfig::trusted_keys` with a new `key_id` and
-   `active: true`, keep the old key with `active: false` so already-issued licences keep verifying.
-3. Set `LICENCE_SIGNING_PRIVATE_KEY` and `LICENCE_SIGNING_KEY_ID` to the new pair.
-4. Set `environment: Live` in `DEFAULT_CONFIG`.
-5. Set `DODO_ENVIRONMENT=live` and point `DODO_PRODUCT_PRO_LIFETIME` at the live product.
-6. Deploy the Edge Functions, then the desktop build.
-7. Run a real purchase and confirm exactly one licence row appears.
+1. Build a server-verified Dodo payment reconciliation path that checks the provider's actual
+   payment state, environment, product, amount and currency against the configured tier; test
+   signed failures, replay, refund and out-of-order events on a disposable deployment.
+2. Implement **signed** purchase-to-device grants and a real customer delivery/recovery channel.
+   The current random purchase key cannot be parsed by the native signed-payload verifier, and
+   neither an email credential nor a working recovery transport is included here. Keep the private
+   key only in a server secret store; embed only its reviewed public key in the Windows build.
+3. Connect native activation/deactivation to the verified service and issue bounded, renewable
+   per-device leases; demonstrate three-device enforcement, reinstalls, transfers and revocations
+   on Windows. A permanent purchase must not be confused with a never-expiring offline lease.
+4. Apply and test migrations/role grants in the intended Supabase project, deploy the Edge
+   Functions in the right order, and verify a full sandbox checkout through receipt, signed
+   activation, expiry and refund. Obtain independent authorization for a tiny real-money test;
+   never use real customer payments as a diagnostic.
+5. Only after the native build, unsigned/signed installer policy, NTFS safety and all other P0
+   release gates pass should a reviewed change deliberately enable live mode.
 
-A build with `environment: Test` can never mint a real entitlement, so step 4 is the only step that
-can go wrong silently. It is a code change, which means it is reviewed.
+The actual Dodo account, Supabase credentials, signing certificate, delivery provider and release
+approval are external/manual requirements; none are generated or committed by this repository.
 
 ### Key rotation and compromise recovery
 
@@ -475,7 +504,7 @@ app, patching the binary, or reverse engineering it, and it is not represented a
 | Webhook replay with a stale timestamp refused | same | local + CI |
 | Webhook replay with an edited body refused | same | local + CI |
 | `whsec_` prefix handling | same | local + CI |
-| Duplicate delivery cannot create a second licence | `webhook_events` + unique constraints; CI `migrations` job | CI |
+| Claim retry, changed-body refusal and stale-worker lease | `claim_webhook_v2` / `finish_webhook_v2`; CI `migrations` job | PGlite locally; real Postgres pending |
 | Device limit enforced atomically | CI `migrations` job against a real Postgres | CI |
 | No client write policy exists | CI `migrations` job | CI |
 | RLS enabled on every licensing table | CI `migrations` job | CI |
@@ -485,12 +514,12 @@ app, patching the binary, or reverse engineering it, and it is not represented a
 | No secret in the bundle or the repo | CI `frontend` and `audit` jobs | CI |
 | The shipped trusted key is the placeholder | CI `licence` job | CI |
 
-**What has not been run.** The Rust tests have not been executed in the environment this was written
-in — there is no Rust toolchain and no crates.io access there, so `cargo test`,
-`cargo clippy` and `cargo fmt` are gated on GitHub Actions on `windows-latest`. The Supabase
-migrations and Edge Functions have not been executed against a live project: there is no network
-access to Supabase and no Dodo credentials. Those paths are covered by CI (`migrations`,
-`licence`) and by a documented manual run in §9, and this document does not claim otherwise.
+**What has not been run.** There is no local Rust toolchain. In the 16 October CI run,
+Windows `cargo fmt --check` passed, Clippy failed and native tests/build/installers were skipped.
+Initial migrations passed against CI's real Postgres; migration `0004` has only run in PGlite with
+a `pgcrypto` substitution and awaits the revised CI job. No Edge Function has been deployed to a
+live Supabase project or tested against real Dodo events. The Node contract suite verifies shared
+HMAC/signing helpers but **not** paid issuance, delivery, refund, recovery or native activation.
 
 ---
 

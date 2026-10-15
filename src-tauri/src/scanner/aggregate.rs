@@ -255,9 +255,9 @@ pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> Prun
     let max_nodes = options.max_nodes.max(max_children + 1);
 
     let depth = index_depth(index, root);
-    let mut result = build_limited(index, root, max_children, depth);
-    if count_nodes(&result.tree) <= max_nodes {
-        return finish(result);
+    let full_tree = build_limited(index, root, max_children, depth);
+    if count_nodes(&full_tree.tree) <= max_nodes {
+        return finish(full_tree);
     }
 
     // The tree is too big, so the depth has to come down.
@@ -268,14 +268,13 @@ pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> Prun
         let candidate = build_limited(index, root, max_children, middle);
         if count_nodes(&candidate.tree) <= max_nodes {
             low = middle;
-            result = candidate;
         } else {
             high = middle - 1;
         }
     }
 
     // Rebuild once at the deepest level that fits, so the returned result is the best one found.
-    result = build_limited(index, root, max_children, low);
+    let mut result = build_limited(index, root, max_children, low);
     if count_nodes(&result.tree) > max_nodes && low > 1 {
         result = build_limited(index, root, max_children, 1);
     }
@@ -336,8 +335,6 @@ fn build_node(
         *pruned_nodes += subtree_size(index, position);
         return node;
     }
-
-    let mut children: Vec<TreeNode> = Vec::new();
 
     // Folders first (biggest first), then the folder's own files.
     let child_dirs: Vec<usize> = index.children_of(position).to_vec();

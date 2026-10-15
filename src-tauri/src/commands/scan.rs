@@ -282,7 +282,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
     // Scan *history* is a paid capability; this list is the in-memory one and stays free.
     let mut summaries: Vec<ScanSummary> = {
         let scans = state.scans()?;
-        let mut collected: Vec<ScanSummary> = scans
+        let collected: Vec<ScanSummary> = scans
             .values()
             .map(|entry| ScanSummary {
                 scan_id: entry.scan_id.clone(),

@@ -209,7 +209,6 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
     let mut paths: Vec<String> = Vec::new();
     let mut size_bytes = 0u64;
     let mut file_count = 0u64;
-    let mut folder_count = 0u64;
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
     let mut contains_protected = false;
@@ -258,6 +257,7 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
     // The Tauri command does exact membership checks with a binary search before accepting a
     // preview, so never let UI display order affect authorization.
     paths.sort_unstable();
+    let folder_count = folder_count_hint(&paths);
 
     // A rule is never allowed to lower itself below "needs review", and a protected category can
     // only ever be informational.
@@ -273,7 +273,7 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
         }
     };
 
-    let reason = build_reason(rule, file_count, folder_count_hint(&paths), cutoff, now_ms);
+    let reason = build_reason(rule, file_count, folder_count, cutoff, now_ms);
 
     Some(CleanupFinding {
         id: format!("rule-{}", rule.id),
@@ -389,6 +389,10 @@ mod tests {
             .find(|finding| finding.id == "rule-r1")
             .expect("a finding for the rule");
         assert_eq!(finding.file_count, 1);
+        assert_eq!(
+            finding.folder_count, 1,
+            "count the file's parent folder in the finding"
+        );
         assert_eq!(finding.size_bytes, 100);
         assert!(finding.paths[0].contains("temp"));
         assert!(!finding.paths.iter().any(|path| path.contains("docs")));

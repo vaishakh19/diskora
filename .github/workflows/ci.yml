@@ -144,6 +144,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # tauri-build reads ../dist even for cargo clippy/test; the separate frontend job's build
+      # output lives on a different runner. Prepare assets here before compiling the build script.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Prepare frontend assets for the Tauri build script
+        working-directory: .
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

@@ -169,16 +169,17 @@ jobs:
 
       - name: Clippy
         shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+          RUST_BACKTRACE: 1
         run: |
           set -o pipefail
-          # Annotate compiler diagnostics: Actions' hosted log download may be unavailable in
-          # restricted environments, but check-run annotations remain accessible through the API.
+          # Hosted logs are not reachable in all environments; publish enough context as check
+          # annotations to diagnose build-script panics as well as compiler errors. Include the
+          # final non-newline-terminated line and leave ANSI coloring off for readable messages.
           if ! cargo clippy --all-targets --message-format=short -- -D warnings >clippy.log 2>&1; then
-            # Cargo can fail before a rustc diagnostic (e.g. registry/network errors); always emit
-            # the log tail, not just lines matching a compiler-error regex. GitHub's annotation
-            # API remains usable when the hosted log download endpoint is unreachable.
-            tail -35 clippy.log | while IFS= read -r line; do
-              printf '::error::%s\n' "$line"
+            tail -35 clippy.log | while IFS= read -r line || [ -n "$line" ]; do
+              [ -z "$line" ] || printf '::error::%s\n' "$line"
             done
             echo '::error::Clippy failed; full diagnostics are in the job log.'
             exit 1

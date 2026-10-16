@@ -99,10 +99,11 @@ pub fn limit_groups(report: DuplicateReport, limit: Option<usize>) -> DuplicateR
         return report;
     }
 
-    // Groups are already ordered largest reclaimable first; re-sorting after truncation is cheap
-    // and guarantees the ordering the UI relies on.
-    let mut kept: Vec<DuplicateGroup> = report.groups.into_iter().take(limit).collect();
-    kept.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
+    // Enforce the largest-N policy even if an upstream caller provided groups out of order.
+    // Truncating before sorting would hide larger reclaimable groups from the free tier.
+    let mut ranked = report.groups;
+    ranked.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
+    let kept: Vec<DuplicateGroup> = ranked.into_iter().take(limit).collect();
 
     let total_copies: usize = kept.iter().map(|group| group.copies.len()).sum();
     let total_reclaimable_bytes: u64 = kept.iter().map(|group| group.reclaimable_bytes).sum();
@@ -430,6 +431,14 @@ mod tests {
     use crate::duplicates::hashing::hash_bytes;
     use std::fs;
 
+    // Product defaults deliberately ignore tiny files; these tests exercise small real fixtures.
+    fn small_file_options() -> DuplicateOptions {
+        DuplicateOptions {
+            min_bytes: 0,
+            ..Default::default()
+        }
+    }
+
     fn record(path: &str, size: u64) -> FileRecord {
         FileRecord {
             path: PathBuf::from(path),
@@ -454,7 +463,7 @@ mod tests {
             record("C:\\c.bin", 200),
             record("C:\\tiny.bin", 1),
         ];
-        let options = DuplicateOptions::default();
+        let options = small_file_options();
         let groups = group_by_size(&files, &options);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, 100);
@@ -486,6 +495,7 @@ mod tests {
             record("C:\\Users\\me\\b.bin", 100),
         ];
         let options = DuplicateOptions {
+            min_bytes: 0,
             exclude_paths: vec!["C:\\Users\\me".to_string()],
             ..Default::default()
         };
@@ -502,6 +512,7 @@ mod tests {
         c.extension = Some("txt".to_string());
         let files = vec![a, b, c];
         let options = DuplicateOptions {
+            min_bytes: 0,
             extensions: vec!["mp4".to_string()],
             ..Default::default()
         };
@@ -527,7 +538,7 @@ mod tests {
             record(&two.to_string_lossy(), 12),
             record(&three.to_string_lossy(), 11),
         ];
-        let options = DuplicateOptions::default();
+        let options = small_file_options();
         let report = build_report(&files, &options, "r1".to_string(), 0, |_, _| {});
 
         assert_eq!(report.total_groups, 1);
@@ -565,7 +576,7 @@ mod tests {
         ];
         let report = build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r2".to_string(),
             0,
             |_, _| {},
@@ -583,7 +594,7 @@ mod tests {
         ];
         let report = build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r3".to_string(),
             0,
             |_, _| {},
@@ -609,7 +620,7 @@ mod tests {
         let mut seen = 0u64;
         build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r4".to_string(),
             0,
             |files, _| {
@@ -637,7 +648,7 @@ mod tests {
         }
         let report = build_report(
             &records,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r5".to_string(),
             0,
             |_, _| {},

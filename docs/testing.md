@@ -52,6 +52,7 @@ itself. No test ever touches a real user directory.
 | Requirement | Where |
 | --- | --- |
 | Size aggregation | `scanner/aggregate.rs` — sizes roll up the tree; every level is exact. |
+| Windows long-path boundary | `scanner/walker.rs::walks_a_small_tree_and_counts_everything` — child paths remain in display form and attach to the scan index; this test must pass on Windows before trusting real-drive totals. |
 | Sunburst data generation | `scanner/aggregate.rs` + `src/features/visualization/layout.test.ts` (the frontend half). |
 | Scan cancellation | `scanner/walker.rs::cancellation_stops_the_walk_early` — a cancelled scan stops before visiting the tree. |
 | Access-denied directories | `scanner/walker.rs::reports_a_missing_root_as_an_error` and `security.rs` — an unreadable root is an error, not an empty scan. |

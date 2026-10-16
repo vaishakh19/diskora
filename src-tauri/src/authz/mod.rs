@@ -197,7 +197,7 @@ mod tests {
     }
 
     fn licensed(config: &CommercialConfig, signing: &SigningKey) -> Authorization {
-        let payload = LicensePayload::permanent(
+        let mut payload = LicensePayload::permanent(
             "lic-1",
             "diskwise-pro",
             "pro-lifetime",
@@ -205,6 +205,7 @@ mod tests {
             NOW - 1000,
             3,
         );
+        payload.device_binding = Some(device().value);
         let key = encode(&payload, &signing.sign(&payload_bytes(&payload)).to_bytes());
         Authorization::resolve(Some(&key), config, NOW, device())
     }

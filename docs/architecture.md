@@ -85,8 +85,10 @@ cancellation checks at entry granularity.
   recorded as a `symlink-cycle` error.
 - **Errors.** Permission denials, missing paths, long paths and vanished files are collected into
   `WalkError { path, kind, message }` and surfaced in the UI. Nothing is silently skipped.
-- **Long paths.** Every path is normalised to the `\\?\` form before it touches the filesystem
-  (`src-tauri/src/filesystem/long_path.rs`), so trees deeper than `MAX_PATH` work.
+- **Long paths.** Filesystem calls use the `\\?\` form (`filesystem/long_path.rs`), but
+  directory entries returned by `read_dir` have that OS-only prefix stripped *before* they are
+  stored or queued. Root, child, file-parent, scan-index and UI paths must share the same display
+  form; otherwise Windows scans silently lose child totals.
 - **Cancellation.** An `Arc<AtomicBool>` checked on every entry, so a cancel stops within one
   directory read.
 - **Memory.** One small `FileRecord` per file and one `DirectoryRecord` per directory. No extended

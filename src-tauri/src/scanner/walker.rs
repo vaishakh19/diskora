@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::filesystem::long_path::normalize_long_path;
 use crate::filesystem::{read_metadata, FileRecord, Kind};
 use crate::platform;
 use crate::scanner::progress::{ProgressCounters, ScanPhase};
@@ -184,7 +185,9 @@ struct WorkOutput {
 /// Runs a full walk. Blocking: call it from a worker thread, never on the async runtime.
 pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun {
     let started = Instant::now();
-    let root = PathBuf::from(&options.root_path);
+    // Keep index/UI paths in their display form. Filesystem calls add the long-path prefix only
+    // at the OS boundary; otherwise child paths from `read_dir` do not match the root in the index.
+    let root = normalize_long_path(Path::new(&options.root_path));
     let mut run = ScanRun::default();
 
     // Root metadata. A missing or non-directory root is an honest error, not an empty scan.
@@ -411,7 +414,9 @@ fn scan_directory(
             }
         };
 
-        let path = entry.path();
+        // `read_dir(\\?\C:\...)` returns `\\?\`-prefixed entries on Windows. Strip that
+        // transport-only prefix before recording, indexing or queuing a child directory.
+        let path = normalize_long_path(&entry.path());
         let meta = match read_metadata(&path, depth + 1) {
             Ok(meta) => meta,
             Err(error) => {
@@ -698,8 +703,8 @@ mod tests {
     #[test]
     fn walks_a_small_tree_and_counts_everything() {
         let root = temp_dir("basic");
-        fs::create_dir_all(root.join("a\\b")).unwrap();
-        fs::write(root.join("a\\b\\deep.bin"), vec![0u8; 2048]).unwrap();
+        fs::create_dir_all(root.join("a").join("b")).unwrap();
+        fs::write(root.join("a").join("b").join("deep.bin"), vec![0u8; 2048]).unwrap();
         fs::write(root.join("top.txt"), vec![0u8; 512]).unwrap();
 
         let options = ScanOptions {
@@ -717,6 +722,18 @@ mod tests {
         assert!(run.errors.is_empty());
         assert!(!run.hit_limit);
         assert_eq!(run.directories[0].parent, None);
+        assert!(run
+            .files
+            .iter()
+            .any(|file| file.path == root.join("top.txt")));
+        assert!(run
+            .directories
+            .iter()
+            .any(|directory| directory.path == root.join("a").join("b")));
+        // The scanner must not leak OS-only `\\?\` prefixes into UI/index paths.
+        let index = crate::scanner::aggregate::ScanIndex::from_run(&run);
+        assert_eq!(index.total_bytes(), 2560);
+        assert!(index.position_of(&root.join("a").join("b")).is_some());
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -131,15 +131,15 @@ pub fn list_large_files(
     let total_bytes: u64 = matched.iter().map(|item| item.size_bytes).sum();
 
     match query.sort.as_str() {
-        "size-asc" => matched.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
+        "size-asc" => matched.sort_by_key(|file| file.size_bytes),
         "modified-desc" => {
-            matched.sort_by(|a, b| b.modified_at.unwrap_or(0).cmp(&a.modified_at.unwrap_or(0)))
+            matched.sort_by_key(|file| std::cmp::Reverse(file.modified_at.unwrap_or(0)))
         }
-        "modified-asc" => {
-            matched.sort_by(|a, b| a.modified_at.unwrap_or(0).cmp(&b.modified_at.unwrap_or(0)))
+        "modified-asc" => matched.sort_by_key(|file| file.modified_at.unwrap_or(0)),
+        "name-asc" => matched.sort_by_cached_key(|file| file.name.to_lowercase()),
+        "name-desc" => {
+            matched.sort_by_cached_key(|file| std::cmp::Reverse(file.name.to_lowercase()))
         }
-        "name-asc" => matched.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-        "name-desc" => matched.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
         _ => matched.sort_by(|a, b| {
             b.size_bytes
                 .cmp(&a.size_bytes)
@@ -223,7 +223,7 @@ mod tests {
             record("C:\\c.bin", 100, "bin", None),
         ];
         let mut sorted = files;
-        sorted.sort_by(|a, b| b.size.cmp(&a.size));
+        sorted.sort_by_key(|file| std::cmp::Reverse(file.size));
         assert_eq!(sorted[0].size, 900);
     }
 

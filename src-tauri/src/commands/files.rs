@@ -56,20 +56,19 @@ pub fn file_details(path: String, state: State<'_, AppState>) -> AppResult<FileD
 
     // Prefer the scan's aggregated totals for folders so the numbers match the visualization.
     let (file_count, folder_count, size_bytes, disk_size_bytes) = if meta.kind == Kind::Folder {
-        match find_index(&state, &candidate).and_then(|index| {
-            index.position_of(&candidate).map(|position| {
-                let aggregate = &index.aggregates[position];
-                (
-                    aggregate.file_count,
-                    aggregate.folder_count,
-                    aggregate.size_bytes,
-                    aggregate.disk_size_bytes,
-                )
+        find_index(&state, &candidate)
+            .and_then(|index| {
+                index.position_of(&candidate).map(|position| {
+                    let aggregate = &index.aggregates[position];
+                    (
+                        aggregate.file_count,
+                        aggregate.folder_count,
+                        aggregate.size_bytes,
+                        aggregate.disk_size_bytes,
+                    )
+                })
             })
-        }) {
-            Some(totals) => totals,
-            None => (0, 0, 0, None),
-        }
+            .unwrap_or_default()
     } else {
         (0, 0, meta.size, meta.disk_size)
     };

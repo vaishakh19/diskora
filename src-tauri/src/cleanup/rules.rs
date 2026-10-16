@@ -161,7 +161,7 @@ pub fn build_findings(
         });
     }
 
-    findings.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    findings.sort_by_key(|finding| std::cmp::Reverse(finding.size_bytes));
     findings
 }
 

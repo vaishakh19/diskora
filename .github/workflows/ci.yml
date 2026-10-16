@@ -181,14 +181,15 @@ jobs:
           # annotations to diagnose build-script panics as well as compiler errors. Include the
           # final non-newline-terminated line and leave ANSI coloring off for readable messages.
           if ! cargo clippy --all-targets --message-format=short -- -D warnings >clippy.log 2>&1; then
-            # GitHub exposes only a small number of annotations per step. Show the FIRST errors:
-            # later summary lines (`could not compile`) otherwise hide the primary diagnostics.
-            # Match diagnostics, not dependency names like `thiserror` or `ErrorStack`.
-            matches=$(grep -Ei '(^|[[:space:]])(error(\[[^]]+\])?:|warning:|panicked at|failed to|caused by:)' clippy.log | head -8 || true)
-            if [ -z "$matches" ]; then matches=$(tail -8 clippy.log); fi
-            while IFS= read -r line || [ -n "$line" ]; do
-              [ -z "$line" ] || printf '::error::%s\n' "$line"
-            done <<< "$matches"
+            # Hosted check runs expose only a handful of annotations. Group up to 64 real
+            # diagnostics into eight annotations instead of losing the rest (or mistaking
+            # dependency names like `thiserror` for an error message).
+            mapfile -t lines < <(grep -Ei '(^|[[:space:]])(error(\[[^]]+\])?:|warning:|panicked at|failed to|caused by:)' clippy.log | head -64 || true)
+            if [ ${#lines[@]} -eq 0 ]; then mapfile -t lines < <(tail -8 clippy.log); fi
+            for ((offset=0; offset<${#lines[@]}; offset+=8)); do
+              printf -v grouped '%s | ' "${lines[@]:offset:8}"
+              printf '::error::%s\n' "$grouped"
+            done
             echo '::error::Clippy failed; full diagnostics are in the job log.'
             exit 1
           fi

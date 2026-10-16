@@ -315,7 +315,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
             .collect();
         collected
     };
-    summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
 
     // Merge in persisted history so the list survives a restart.
     if let Ok(guard) = state.database() {
@@ -344,7 +344,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
                         persisted: row.persisted,
                     });
                 }
-                summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
             }
         }
     }

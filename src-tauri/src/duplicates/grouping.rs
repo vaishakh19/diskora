@@ -102,7 +102,7 @@ pub fn limit_groups(report: DuplicateReport, limit: Option<usize>) -> DuplicateR
     // Groups are already ordered largest reclaimable first; re-sorting after truncation is cheap
     // and guarantees the ordering the UI relies on.
     let mut kept: Vec<DuplicateGroup> = report.groups.into_iter().take(limit).collect();
-    kept.sort_by(|a, b| b.reclaimable_bytes.cmp(&a.reclaimable_bytes));
+    kept.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
 
     let total_copies: usize = kept.iter().map(|group| group.copies.len()).sum();
     let total_reclaimable_bytes: u64 = kept.iter().map(|group| group.reclaimable_bytes).sum();
@@ -252,7 +252,7 @@ where
     }
 
     // Biggest savings first.
-    groups.sort_by(|a, b| b.reclaimable_bytes.cmp(&a.reclaimable_bytes));
+    groups.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
 
     let total_groups = groups.len();
     let total_copies: usize = groups.iter().map(|group| group.copies.len()).sum();

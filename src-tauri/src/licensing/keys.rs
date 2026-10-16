@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn the_embedded_key_is_not_a_private_key_shape() {
         // Sanity: it must decode and be a fixed length, never empty.
-        assert!(LICENSE_PUBLIC_KEY_BASE64.len() > 0);
+        assert!(!LICENSE_PUBLIC_KEY_BASE64.is_empty());
         assert_eq!(public_key().len(), 32);
     }
 }

@@ -44,12 +44,7 @@ impl Default for AppSettings {
 impl AppSettings {
     /// Sanity-clamps user-supplied values so a bad settings file cannot break scanning.
     pub fn normalized(mut self) -> Self {
-        if self.max_children_per_node < 2 {
-            self.max_children_per_node = 2;
-        }
-        if self.max_children_per_node > 1000 {
-            self.max_children_per_node = 1000;
-        }
+        self.max_children_per_node = self.max_children_per_node.clamp(2, 1000);
         if self.large_unused_days > 3650 {
             self.large_unused_days = 3650;
         }
@@ -84,11 +79,13 @@ mod tests {
 
     #[test]
     fn normalization_clamps_out_of_range_values() {
-        let mut settings = AppSettings::default();
-        settings.max_children_per_node = 0;
-        settings.large_unused_days = 99_999;
-        settings.theme = "neon".to_string();
-        settings.cache_paths = vec!["C:\\cache".to_string(), "   ".to_string()];
+        let settings = AppSettings {
+            max_children_per_node: 0,
+            large_unused_days: 99_999,
+            theme: "neon".to_string(),
+            cache_paths: vec!["C:\\cache".to_string(), "   ".to_string()],
+            ..Default::default()
+        };
         let normalized = settings.normalized();
         assert_eq!(normalized.max_children_per_node, 2);
         assert_eq!(normalized.large_unused_days, 3650);

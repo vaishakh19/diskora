@@ -264,7 +264,7 @@ pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> Prun
     let mut low = 1usize;
     let mut high = depth.saturating_sub(1).max(1);
     while low < high {
-        let middle = low + (high - low + 1) / 2;
+        let middle = low + (high - low).div_ceil(2);
         let candidate = build_limited(index, root, max_children, middle);
         if count_nodes(&candidate.tree) <= max_nodes {
             low = middle;

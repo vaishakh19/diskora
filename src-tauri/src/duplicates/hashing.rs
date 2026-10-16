@@ -14,9 +14,10 @@ use crate::filesystem::long_path::to_unc_long_path;
 pub const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Supported algorithms. The UI only offers what is compiled in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HashAlgorithm {
+    #[default]
     Sha256,
 }
 
@@ -32,12 +33,6 @@ impl HashAlgorithm {
             "blake3" | "sha256" => HashAlgorithm::Sha256,
             _ => HashAlgorithm::Sha256,
         }
-    }
-}
-
-impl Default for HashAlgorithm {
-    fn default() -> Self {
-        HashAlgorithm::Sha256
     }
 }
 

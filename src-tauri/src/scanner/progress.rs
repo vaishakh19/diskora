@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Mirrors the `ScanPhase` union in `src/types/contracts.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScanPhase {
+    #[default]
     Preparing,
     Walking,
     Hashing,
@@ -20,12 +21,6 @@ pub enum ScanPhase {
     Done,
     Cancelled,
     Error,
-}
-
-impl Default for ScanPhase {
-    fn default() -> Self {
-        Self::Preparing
-    }
 }
 
 impl ScanPhase {
@@ -99,15 +94,26 @@ impl ProgressCounters {
     }
 
     /// Atomically reserves one entry so concurrent workers cannot overshoot a hard cap.
+    /// A CAS loop works on the crate's Rust 1.80 MSRV without deprecated APIs.
     pub fn claim_entry(&self, limit: u64) -> bool {
         if limit == 0 {
             return true;
         }
-        self.entries
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                (count < limit).then_some(count + 1)
-            })
-            .is_ok()
+        let mut current = self.entries.load(Ordering::SeqCst);
+        loop {
+            if current >= limit {
+                return false;
+            }
+            match self.entries.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Returns true only the first time a traversal limit is reached.
@@ -214,6 +220,25 @@ pub fn estimate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn entry_claims_never_exceed_the_cap_even_with_parallel_workers() {
+        let counters = Arc::new(ProgressCounters::new());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counters = Arc::clone(&counters);
+                std::thread::spawn(move || (0..100).filter(|_| counters.claim_entry(37)).count())
+            })
+            .collect();
+        let claimed: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        assert_eq!(claimed, 37);
+        assert_eq!(counters.entries.load(Ordering::SeqCst), 37);
+        assert!(!counters.claim_entry(37));
+    }
 
     #[test]
     fn eta_is_unknown_below_five_percent() {

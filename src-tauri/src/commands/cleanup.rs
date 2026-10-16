@@ -330,12 +330,12 @@ mod tests {
     #[test]
     fn plan_cannot_invent_finding_ids_or_files_even_under_an_approved_root() {
         let (finding, mut plan) = sample();
-        assert!(validate_plan_items(&plan, &[finding.clone()]).is_ok());
+        assert!(validate_plan_items(&plan, std::slice::from_ref(&finding)).is_ok());
         plan.items[0].finding_id = "forged".to_string();
-        assert!(validate_plan_items(&plan, &[finding.clone()]).is_err());
+        assert!(validate_plan_items(&plan, std::slice::from_ref(&finding)).is_err());
         plan.items[0].finding_id = finding.id.clone();
         plan.items[0].paths = vec!["C:\\Temp\\new.bin".to_string()];
-        assert!(validate_plan_items(&plan, &[finding.clone()]).is_err());
+        assert!(validate_plan_items(&plan, std::slice::from_ref(&finding)).is_err());
         plan.items[0].paths = vec![finding.paths[0].clone(); 2];
         assert!(validate_plan_items(&plan, &[finding]).is_err());
     }

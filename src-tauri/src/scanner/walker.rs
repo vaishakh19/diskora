@@ -335,6 +335,9 @@ pub fn walk(options: &ScanOptions, counters: &Arc<ProgressCounters>) -> ScanRun 
 }
 
 /// Reads one directory level.
+/// These arguments are explicit per-worker guards and shared state; grouping them would obscure
+/// the root-confinement, cancellation and quota checks at the security boundary.
+#[allow(clippy::too_many_arguments)]
 fn scan_directory(
     dir: &Path,
     depth: usize,

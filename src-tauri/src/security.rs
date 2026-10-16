@@ -141,7 +141,7 @@ fn traversal_style_paths_are_not_actionable() {
         let context = ValidationContext {
             index: &index,
             blocked_paths: &[],
-            approved_roots: &[approved.clone()],
+            approved_roots: std::slice::from_ref(&approved),
         };
         let result = execute_plan(&plan, &titles, &context);
         // Either the path does not exist (skipped) or it is outside the root (refused).

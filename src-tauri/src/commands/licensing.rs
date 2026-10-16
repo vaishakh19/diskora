@@ -118,13 +118,14 @@ pub fn license_activate(license_key: String, state: State<'_, AppState>) -> AppR
         return Ok(state.entitlement());
     }
 
-    // Persist the key and mirror the activation.
+    // Do not grant an in-memory paid entitlement if the binding or ledger cannot persist.
     state.store_license_key(Some(license_key.trim()))?;
-    state.set_license_binding(&device.value);
-    state.set_authorization(authorization.clone());
-
+    state
+        .set_license_binding(&device.value)
+        .map_err(AppError::Database)?;
     mirror_activation(&state, &payload, &device, now)?;
     cache_entitlement(&state, &authorization.entitlement)?;
+    state.set_authorization(authorization.clone());
 
     let _ = record_audit(
         &state,

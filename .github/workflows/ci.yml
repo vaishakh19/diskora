@@ -197,7 +197,20 @@ jobs:
       # Unit tests and the integration tests together: `cargo test --all` would skip the
       # `tests/` directory in some layouts, so both targets are named explicitly.
       - name: Tests
-        run: cargo test --lib --tests
+        shell: bash
+        run: |
+          # The hosted log archive is not accessible in every environment. Surface failing test
+          # names and assertions through check-run annotations without hiding the full job log.
+          if ! cargo test --lib --tests -- --nocapture >tests.log 2>&1; then
+            mapfile -t lines < <(grep -E '(^test .*FAILED|^---- .* stdout ----|panicked at|assertion .*failed|^  left:|^ right:|^failures:|^test result:|^error: test failed)' tests.log | head -56 || true)
+            if [ ${#lines[@]} -eq 0 ]; then mapfile -t lines < <(tail -16 tests.log); fi
+            for ((offset=0; offset<${#lines[@]}; offset+=8)); do
+              printf -v grouped '%s | ' "${lines[@]:offset:8}"
+              printf '::error::%s\n' "$grouped"
+            done
+            echo '::error::Native Rust tests failed; full diagnostics are in the job log.'
+            exit 1
+          fi
 
       - name: Licence lifecycle integration test
         run: cargo test --test licence_lifecycle -- --nocapture

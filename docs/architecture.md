@@ -327,11 +327,12 @@ core:window:allow-minimize, allow-toggle-maximize, allow-close, allow-start-drag
              allow-is-maximized, allow-set-focus
 core:event:default
 dialog:allow-open, allow-message, allow-ask, allow-confirm
-opener:allow-open-path, allow-open-url
 ```
 
-No `shell`, no `fs`, no `process`, no `allow-execute`. Every filesystem action is a narrowly-scoped
-Rust command instead, and `src-tauri/src/security.rs` asserts the capability file stays that way.
+No `shell`, `fs`, `process`, `opener`, or `allow-execute` permission. The unused opener plugin is
+not registered: even its `open-path` permission would bypass the native folder-only guard. Every
+filesystem action is a narrowly-scoped Rust command; `src-tauri/src/security.rs` asserts both the
+capability allowlist and absence of the plugin registration.
 
 The clipboard uses the web Clipboard API on the secure `http://tauri.localhost` origin.
 

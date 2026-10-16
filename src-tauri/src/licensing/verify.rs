@@ -268,7 +268,9 @@ pub fn apply_offline_grace(entitlement: Entitlement, now: i64) -> Entitlement {
     if let Some(until) = entitlement.lease_until {
         if now >= until {
             entitlement.state = EntitlementState::ProExpired;
+            entitlement.tier = PlanTier::Free;
             entitlement.features = FeatureFlags::free();
+            entitlement.duplicate_group_limit = FREE_DUPLICATE_GROUP_LIMIT;
             entitlement.reason = Some(
                 "This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected."
                     .to_string(),
@@ -464,7 +466,13 @@ mod tests {
         cached.lease_until = Some(1_000);
         let resolved = apply_offline_grace(cached, NOW);
         assert_eq!(resolved.state, EntitlementState::ProExpired);
+        assert_eq!(resolved.tier, PlanTier::Free);
+        assert_eq!(resolved.duplicate_group_limit, FREE_DUPLICATE_GROUP_LIMIT);
         assert!(!resolved.features.scan_history);
+        assert!(
+            resolved.permanent,
+            "a lapsed lease does not revoke ownership"
+        );
     }
 
     #[test]

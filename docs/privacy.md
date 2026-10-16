@@ -92,14 +92,13 @@ core:window:allow-minimize, allow-toggle-maximize, allow-close, allow-start-drag
              allow-is-maximized, allow-set-focus
 core:event:default
 dialog:allow-open, allow-message, allow-ask, allow-confirm
-opener:allow-open-path, allow-open-url
 ```
 
-That is the complete list. There is no `shell` permission, no filesystem scope and no ability to
-spawn a process. Every filesystem action — reading metadata, revealing in Explorer, opening a file,
-moving something to the Recycle Bin — is a narrowly-scoped Rust command that validates its input
-first. `src-tauri/src/security.rs` contains a test that fails if a dangerous permission is ever added
-to the capability file.
+That is the complete list. There is no `shell`, `fs`, `process`, or `opener` permission: the opener
+plugin is not registered, because its `open-path` API could run a scanned file without the native
+folder guard. Reading metadata, revealing a file in Explorer, opening an ordinary folder, and
+moving an approved file to the Recycle Bin are narrowly-scoped Rust commands that validate their
+inputs. `src-tauri/src/security.rs` tests the capability allowlist and plugin registration.
 
 ## Verifying this yourself
 
@@ -107,8 +106,10 @@ The claims above are testable rather than aspirational:
 
 - `src-tauri/src/security.rs::the_webview_has_no_shell_permission` asserts the capability file's
   contents.
-- `src-tauri/src/security.rs::no_command_in_the_backend_spawns_a_scanned_file` asserts the only
-  process the backend ever starts is `explorer.exe` with a fixed argument shape.
+- `src-tauri/src/security.rs::no_command_in_the_backend_spawns_a_scanned_file` checks that file
+  opening goes through the folder-only native command and Explorer's OS-provided absolute path.
+  The licence device-binding helper separately invokes the fixed Windows `reg` command to read a
+  machine identifier; it does not take a scanned path.
 - The Privacy screen in the running app reads the real database and data-directory paths from the
   backend, so the list cannot drift from reality.
 - `.github/workflows/ci.yml` greps the built `dist/` bundle and the tracked code for the shapes a

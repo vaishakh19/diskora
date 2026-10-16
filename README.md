@@ -35,9 +35,9 @@ npm run app:dev         # starts Vite itself and opens the Tauri desktop window
 
 Do not start `npm run dev` separately on the same port. Start with a small disposable folder:
 scanning is read-only, but **native compilation and cleanup are not yet release-verified**. The
-latest completed Windows CI reached native tests (214 passed, 6 failed); its build and installers
-were skipped. Fixes for those failures await CI verification. See the release audit before relying
-on an actual-disk run.
+latest completed Windows CI passed 222 native library tests but failed one licence integration
+test; its debug build and installers were skipped. The follow-up fix awaits CI. See the release
+audit before relying on an actual-disk run.
 
 ---
 

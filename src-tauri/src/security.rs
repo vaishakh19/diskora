@@ -439,17 +439,25 @@ fn the_webview_has_no_shell_permission() {
         "\"core:window:allow-close\"",
         "\"core:event:default\"",
         "\"dialog:allow-open\"",
-        "\"opener:allow-open-path\"",
     ] {
         assert!(permissions.contains(required), "must grant {required}");
     }
 
-    for forbidden in ["shell", "fs:", "allow-execute", "process:", "http:"] {
+    for forbidden in [
+        "shell",
+        "fs:",
+        "allow-execute",
+        "process:",
+        "http:",
+        "opener:",
+    ] {
         assert!(
             !permissions.contains(forbidden),
             "must not grant anything matching {forbidden}"
         );
     }
+    // The plugin itself must not be registered: opening a path bypasses open_path's folder guard.
+    assert!(!include_str!("lib.rs").contains("tauri_plugin_opener::init"));
 }
 
 /* ------------------------------ protected data ------------------------------ */

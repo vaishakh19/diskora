@@ -74,7 +74,7 @@ itself. No test ever touches a real user directory.
 | Empty and error states | `src/app/App.test.tsx` (no scan, no results, unreadable volume) and `scanner/aggregate.rs::an_empty_scan_index_produces_a_single_node_tree`. |
 | Settings normalisation | `settings.rs::normalization_clamps_out_of_range_values`. |
 | SQLite round-trips and idempotent migrations | `storage/db.rs`. |
-| Capability allowlist | `security.rs::the_webview_has_no_shell_permission` asserts the capability file contains no shell, fs or process permission. |
+| Capability allowlist | `security.rs::the_webview_has_no_shell_permission` asserts no shell, fs, process or opener permission and no opener plugin registration. |
 | No scanned file is ever executed | `commands/files.rs::only_folders_can_be_opened_not_scanned_files` checks the native guard without starting a process; `security.rs::no_command_in_the_backend_spawns_a_scanned_file` inspects the fixed Explorer launch in `platform/win32.rs`. A Windows interaction test remains required. |
 
 ---

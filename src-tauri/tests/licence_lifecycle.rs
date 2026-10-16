@@ -333,11 +333,24 @@ fn a_lapsed_lease_on_a_permanent_licence_is_not_revocation() {
     assert!(entitlement.permanent);
     assert_eq!(entitlement.state, EntitlementState::ProActive);
 
-    // Even a payload that somehow carries an old lease on a permanent tier stays ProActive: the
-    // permanent flag wins.
+    // A permanent purchase still requires a current validation lease when one is present. This
+    // branch simulates stale cached data; the verifier itself refuses lapsed signed payloads.
     verified.lease_until = Some(now - 24 * 60 * 60 * 1000);
     let graced = entitlement_from_payload(&verified, &tier, &config(&vectors), now);
-    assert_eq!(graced.state, EntitlementState::ProActive);
+    assert_eq!(graced.state, EntitlementState::ProExpired);
+    assert!(graced.permanent, "ownership is unaffected");
+    assert!(
+        graced.features.core_analysis,
+        "free scanning remains available"
+    );
+    assert!(
+        !graced.features.export_reports,
+        "paid features require re-verification"
+    );
+    assert!(graced
+        .reason
+        .unwrap_or_default()
+        .contains("purchase is not affected"));
 }
 
 #[test]

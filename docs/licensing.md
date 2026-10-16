@@ -511,12 +511,11 @@ app, patching the binary, or reverse engineering it, and it is not represented a
 | RLS enabled on every licensing table | CI `migrations` job | CI |
 | A forged licence grants nothing | `src-tauri/tests/licence_lifecycle.rs` | CI |
 | A modified frontend cannot bypass authorization | `src-tauri/tests/licence_lifecycle.rs` | CI |
-| A permanent licence with a lapsed lease stays paid | all three suites | local + CI |
+| A lapsed validation lease suspends paid features without revoking permanent ownership; scanning stays free | Rust unit/integration and TypeScript entitlement tests | Awaiting updated Windows CI; frontend tests pass locally |
 | No secret in the bundle or the repo | CI `frontend` and `audit` jobs | CI |
 | The shipped trusted key is the placeholder | CI `licence` job | CI |
 
-**What has not been run.** There is no local Rust toolchain. In the 16 October CI run,
-Windows `cargo fmt --check` passed, Clippy failed and native tests/build/installers were skipped.
+**What has not been run.** There is no local Rust toolchain. In [Windows CI run 38894561484](https://github.com/vaishakh19/diskora/actions/runs/38894561484), Rust formatting, Clippy and 222 library tests passed, but one of 27 licence integration tests failed on a stale assertion that permanent ownership bypasses a lapsed validation lease. The assertion has been corrected to require re-verification; this fix awaits CI. The debug build, link check and installers were skipped.
 Migrations `0001`–`0004` and the webhook retry assertions passed against real PostgreSQL 17 in
 [CI run 38793800761](https://github.com/vaishakh19/diskora/actions/runs/38793800761); no Edge
 Function has been deployed to a live Supabase project or tested against real Dodo events. The Node contract suite verifies shared

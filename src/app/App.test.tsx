@@ -67,9 +67,15 @@ describe('application shell', () => {
     expect(screen.getByTestId('home-view')).toBeDefined();
   });
 
-  it('opens the licensing and privacy pages', async () => {
+  it('opens licensing without offering an unavailable purchase, then opens privacy', async () => {
     await boot();
     const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /plans & licence/i }));
+    const plans = screen.getByTestId('licensing-view');
+    expect(within(plans).getByText(/₹1,499 one time/i)).toBeDefined();
+    expect(within(plans).getByRole('button', { name: /not available for purchase/i }).hasAttribute('disabled')).toBe(true);
+    expect(within(plans).getByText(/scheduled scans and report exports are not implemented/i)).toBeDefined();
+
     await user.click(screen.getByRole('button', { name: /^settings$/i }));
     expect(screen.getByTestId('settings-view')).toBeDefined();
     expect(screen.getByLabelText(/theme/i)).toBeDefined();

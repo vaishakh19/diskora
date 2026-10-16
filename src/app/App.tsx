@@ -55,6 +55,19 @@ function Shell(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [actions]);
 
+  // Never present synthetic UI when native injection failed in a packaged app.
+  if (state.bootstrapError) {
+    return (
+      <main role="alert" className="flex min-h-screen items-center justify-center bg-canvas p-8 text-ink">
+        <div className="max-w-md rounded-panel border border-danger bg-surface p-6">
+          <h1 className="text-lg font-semibold">Diskwise could not start</h1>
+          <p className="mt-3 text-sm">{state.bootstrapError}</p>
+          <p className="mt-3 text-xs text-ink-muted">No scan or cleanup operations are available.</p>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-canvas text-ink" data-testid="app-shell">
       <TitleBar />

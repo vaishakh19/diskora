@@ -9,6 +9,4 @@
 
 pub mod product;
 
-pub use product::{
-    CommercialConfig, Environment, ProductTier, TrustedKey, DEFAULT_CONFIG,
-};
+pub use product::{CommercialConfig, Environment, ProductTier, TrustedKey, DEFAULT_CONFIG};

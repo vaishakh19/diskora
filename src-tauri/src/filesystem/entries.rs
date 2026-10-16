@@ -67,8 +67,20 @@ pub fn read_metadata(path: &Path, depth: usize) -> std::io::Result<EntryMeta> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
+    // A Windows junction/mount point is a reparse point even when `is_symlink` is false.
+    // Never descend through one (nor pass it to the cleanup executor as a regular file).
+    #[cfg(windows)]
+    let is_symlink = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.is_symlink() || metadata.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(windows))]
     let is_symlink = metadata.is_symlink();
-    let kind = if metadata.is_dir() { Kind::Folder } else { Kind::File };
+    let kind = if metadata.is_dir() {
+        Kind::Folder
+    } else {
+        Kind::File
+    };
 
     let extension = if kind == Kind::File {
         path.extension().map(|e| e.to_string_lossy().to_lowercase())
@@ -97,7 +109,11 @@ pub fn read_metadata(path: &Path, depth: usize) -> std::io::Result<EntryMeta> {
         path: path.to_path_buf(),
         name,
         kind,
-        size: if kind == Kind::File { metadata.len() } else { 0 },
+        size: if kind == Kind::File {
+            metadata.len()
+        } else {
+            0
+        },
         disk_size,
         modified_at: millis(metadata.modified().ok()),
         created_at: millis(metadata.created().ok()),

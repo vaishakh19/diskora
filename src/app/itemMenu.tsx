@@ -33,12 +33,14 @@ export function ItemMenuProvider({ children }: { children: ReactNode }): React.J
           disabled: synthetic,
           onSelect: () => void actions.reveal(path),
         },
-        {
-          label: kind === 'file' ? 'Open with default app' : 'Open folder',
-          icon: <ExternalLink aria-hidden className="size-3.5" />,
-          disabled: synthetic,
-          onSelect: () => void actions.open(path),
-        },
+        ...(kind === 'folder'
+          ? [{
+              label: 'Open folder',
+              icon: <ExternalLink aria-hidden className="size-3.5" />,
+              disabled: synthetic,
+              onSelect: () => void actions.open(path),
+            }]
+          : []),
         {
           label: 'Copy full path',
           icon: <Copy aria-hidden className="size-3.5" />,

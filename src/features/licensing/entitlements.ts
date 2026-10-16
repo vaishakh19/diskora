@@ -121,9 +121,7 @@ export function daysRemaining(leaseUntil: number | null, now = Date.now()): numb
  */
 export interface VerifiedLicensePayload {
   plan: PlanTier;
-  /**
-   * `true` for a one-time purchase. A permanent licence never expires, whatever the lease says.
-   */
+  /** `true` for permanent ownership; an expired validation lease still suspends paid access. */
   permanent: boolean;
   /** Epoch ms at which the offline validation lease ends, or `null` for a perpetual lease. */
   leaseUntil: number | null;
@@ -138,10 +136,8 @@ export function entitlementFromVerifiedLicense(
   payload: VerifiedLicensePayload,
   now = Date.now(),
 ): Entitlement {
-  // A lapsed *lease* on a permanent licence is a re-verification problem, not a loss of ownership.
-  // A lapsed lease on a non-permanent licence is a real expiry.
-  const leaseLapsed = payload.leaseUntil !== null && payload.leaseUntil <= now;
-  const expired = leaseLapsed && !payload.permanent;
+  // A lapsed validation lease suspends paid access on every tier; it never revokes ownership.
+  const expired = payload.leaseUntil !== null && payload.leaseUntil <= now;
   const state: EntitlementState = expired
     ? 'pro-expired'
     : payload.plan === 'trial'
@@ -158,33 +154,46 @@ export function entitlementFromVerifiedLicense(
     verifiedAt: now,
     source: 'license-key',
     reason: expired
-      ? 'This licence needs to be re-verified. Connect to the internet and re-activate; your purchase is not affected.'
+      ? 'This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected.'
       : null,
     daysRemaining: daysRemaining(payload.leaseUntil, now),
     deviceLimit: payload.deviceLimit ?? 1,
     activeDevices: payload.activeDevices ?? 0,
-    duplicateGroupLimit: 0,
+    duplicateGroupLimit: expired ? FREE_DUPLICATE_GROUP_LIMIT : 0,
   };
 }
 
-/**
- * Applies the offline grace period: a Pro license that cannot be re-verified keeps working for
- * `graceDays` so a laptop that is offline for a week is not locked out.
- * Returns the state the entitlement should degrade to once the grace period ends.
- */
+/** Mirrors Rust's cached-entitlement policy; only the backend can authorize paid actions. */
 export function applyOfflineGrace(
   entitlement: Entitlement,
   now = Date.now(),
-  graceDays = 7,
+  graceDays = 30,
 ): Entitlement {
   if (entitlement.state !== 'pro-active' && entitlement.state !== 'trial') return entitlement;
-  // A perpetual lease never lapses, so a permanent licence is never degraded by being offline.
-  if (entitlement.leaseUntil === null) return entitlement;
-  // A permanent licence with a lapsed lease stays paid: only the re-validation window ran out.
-  if (entitlement.permanent) return entitlement;
-  const graceUntil = entitlement.leaseUntil + graceDays * DAY_MS;
-  if (now <= graceUntil) return entitlement;
-  return { ...entitlement, state: 'pro-expired', tier: 'free', features: featuresFor('pro-expired') };
+  if (entitlement.leaseUntil !== null && now >= entitlement.leaseUntil) {
+    return {
+      ...entitlement,
+      state: 'pro-expired',
+      tier: 'free',
+      features: featuresFor('pro-expired'),
+      daysRemaining: 0,
+      duplicateGroupLimit: FREE_DUPLICATE_GROUP_LIMIT,
+      reason: 'This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected.',
+    };
+  }
+  const staleAfter = (entitlement.verifiedAt ?? 0) + graceDays * DAY_MS;
+  if (now > staleAfter) {
+    return {
+      ...entitlement,
+      state: 'free',
+      tier: 'free',
+      features: featuresFor('free'),
+      daysRemaining: null,
+      duplicateGroupLimit: FREE_DUPLICATE_GROUP_LIMIT,
+      reason: 'The licence could not be re-verified and the offline grace period has passed.',
+    };
+  }
+  return entitlement;
 }
 
 /** The transition table, used by the UI copy and by tests. */

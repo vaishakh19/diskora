@@ -1,5 +1,9 @@
 # Architecture
 
+> This describes the intended source-level boundaries. The Windows Rust tests and build have
+> **not** passed; see [the release audit](release-audit.md). The browser demo is synthetic and
+> never performs destructive operations.
+
 Diskwise is three layers with a hard boundary between the UI and the filesystem. The webview can
 only reach the filesystem through the command surface in `src-tauri/src/commands/`; there is no
 filesystem scope and no shell-execution permission in the capability file.
@@ -81,8 +85,10 @@ cancellation checks at entry granularity.
   recorded as a `symlink-cycle` error.
 - **Errors.** Permission denials, missing paths, long paths and vanished files are collected into
   `WalkError { path, kind, message }` and surfaced in the UI. Nothing is silently skipped.
-- **Long paths.** Every path is normalised to the `\\?\` form before it touches the filesystem
-  (`src-tauri/src/filesystem/long_path.rs`), so trees deeper than `MAX_PATH` work.
+- **Long paths.** Filesystem calls use the `\\?\` form (`filesystem/long_path.rs`), but
+  directory entries returned by `read_dir` have that OS-only prefix stripped *before* they are
+  stored or queued. Root, child, file-parent, scan-index and UI paths must share the same display
+  form; otherwise Windows scans silently lose child totals.
 - **Cancellation.** An `Arc<AtomicBool>` checked on every entry, so a cancel stops within one
   directory read.
 - **Memory.** One small `FileRecord` per file and one `DirectoryRecord` per directory. No extended
@@ -188,9 +194,13 @@ Rules → findings → preview → execute.
   - is it a link? refuse — never delete through a link,
   - is it a synthetic `Other` node? refuse,
   - does it still exist? if not, report `missing`,
-  - has it changed size since the scan? if so, report `changed` and skip it,
-  - otherwise act: Recycle Bin by default (`trash::delete`), permanent deletion only when the caller
-    explicitly asks for it.
+  - does it match an exact scanned file with unchanged size and modification time? if not, skip,
+  - does it have an unconsumed, explicitly confirmed preview ticket for these exact paths? if not,
+    refuse at the Tauri command boundary,
+  - otherwise act: an authorized Recycle Bin move (`trash::delete`) of individual files only.
+    Permanent deletion is **disabled**, even for paid users, until NTFS handle-level safety is
+    demonstrated on Windows. A path can still change between validation and action: do not call
+    this a verified safety guarantee before native race tests.
 - Failures and partial completion are reported path by path. Nothing is swallowed.
 
 ---
@@ -295,13 +305,15 @@ so the exact set of OS calls is explicit and reviewable:
 | `GetVolumeInformationW` | volume label and filesystem name |
 | `GetCompressedFileSizeW` | on-disk (allocated) size, including sparse and compressed files |
 | `SHQueryRecycleBinW` | Recycle Bin contents |
-| `ShellExecuteW` | "open with the default application" |
 
 On non-Windows targets a portable fallback provides the same functions with honest "not available"
 answers, which is what lets the Rust unit tests run on Linux CI runners.
 
-"Reveal in File Explorer" uses `explorer.exe /select,<path>` with a validated argument. It is a Rust
-command, not a permission granted to the webview.
+Only ordinary folders can be opened in File Explorer; the native command rejects files and
+reparse points. "Reveal in File Explorer" uses `explorer.exe /select,<path>` with a validated
+argument. The executable is resolved from `GetWindowsDirectoryW` rather than searched in the
+working directory or `PATH`. Neither command uses `ShellExecuteW` on a scanned file, so a modified
+webview cannot ask the app to run an `.exe` or script. Neither is a webview shell permission.
 
 ---
 
@@ -315,11 +327,12 @@ core:window:allow-minimize, allow-toggle-maximize, allow-close, allow-start-drag
              allow-is-maximized, allow-set-focus
 core:event:default
 dialog:allow-open, allow-message, allow-ask, allow-confirm
-opener:allow-open-path, allow-open-url
 ```
 
-No `shell`, no `fs`, no `process`, no `allow-execute`. Every filesystem action is a narrowly-scoped
-Rust command instead, and `src-tauri/src/security.rs` asserts the capability file stays that way.
+No `shell`, `fs`, `process`, `opener`, or `allow-execute` permission. The unused opener plugin is
+not registered: even its `open-path` permission would bypass the native folder-only guard. Every
+filesystem action is a narrowly-scoped Rust command; `src-tauri/src/security.rs` asserts both the
+capability allowlist and absence of the plugin registration.
 
 The clipboard uses the web Clipboard API on the secure `http://tauri.localhost` origin.
 

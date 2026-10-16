@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -100,10 +99,11 @@ pub fn limit_groups(report: DuplicateReport, limit: Option<usize>) -> DuplicateR
         return report;
     }
 
-    // Groups are already ordered largest reclaimable first; re-sorting after truncation is cheap
-    // and guarantees the ordering the UI relies on.
-    let mut kept: Vec<DuplicateGroup> = report.groups.into_iter().take(limit).collect();
-    kept.sort_by(|a, b| b.reclaimable_bytes.cmp(&a.reclaimable_bytes));
+    // Enforce the largest-N policy even if an upstream caller provided groups out of order.
+    // Truncating before sorting would hide larger reclaimable groups from the free tier.
+    let mut ranked = report.groups;
+    ranked.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
+    let kept: Vec<DuplicateGroup> = ranked.into_iter().take(limit).collect();
 
     let total_copies: usize = kept.iter().map(|group| group.copies.len()).sum();
     let total_reclaimable_bytes: u64 = kept.iter().map(|group| group.reclaimable_bytes).sum();
@@ -228,7 +228,12 @@ where
                 a.modified_at
                     .unwrap_or(i64::MAX)
                     .cmp(&b.modified_at.unwrap_or(i64::MAX))
-                    .then_with(|| a.path.matches('\\').count().cmp(&b.path.matches('\\').count()))
+                    .then_with(|| {
+                        a.path
+                            .matches('\\')
+                            .count()
+                            .cmp(&b.path.matches('\\').count())
+                    })
                     .then_with(|| a.path.cmp(&b.path))
             });
             if let Some(first) = entries.first_mut() {
@@ -248,7 +253,7 @@ where
     }
 
     // Biggest savings first.
-    groups.sort_by(|a, b| b.reclaimable_bytes.cmp(&a.reclaimable_bytes));
+    groups.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
 
     let total_groups = groups.len();
     let total_copies: usize = groups.iter().map(|group| group.copies.len()).sum();
@@ -284,12 +289,15 @@ pub fn retain_existing(groups: &mut Vec<DuplicateGroup>) -> usize {
     let mut removed = 0usize;
     for group in groups.iter_mut() {
         let before = group.copies.len();
-        group.copies
+        group
+            .copies
             .retain(|copy| PathBuf::from(&copy.path).exists());
         let after = group.copies.len();
         if after < before {
             removed += before - after;
-            group.reclaimable_bytes = group.size_bytes.saturating_mul(after.saturating_sub(1) as u64);
+            group.reclaimable_bytes = group
+                .size_bytes
+                .saturating_mul(after.saturating_sub(1) as u64);
             if after < 2 {
                 group.reclaimable_bytes = 0;
             }
@@ -393,7 +401,11 @@ mod limit_tests {
     fn the_totals_stay_arithmetically_exact() {
         let report = report_of(10);
         let limited = limit_groups(report, Some(4));
-        let sum: u64 = limited.groups.iter().map(|group| group.reclaimable_bytes).sum();
+        let sum: u64 = limited
+            .groups
+            .iter()
+            .map(|group| group.reclaimable_bytes)
+            .sum();
         assert_eq!(sum, limited.total_reclaimable_bytes);
         let copies: usize = limited.groups.iter().map(|group| group.copies.len()).sum();
         assert_eq!(copies, limited.total_copies);
@@ -404,7 +416,11 @@ mod limit_tests {
         let report = report_of(6);
         let limited = limit_groups(report, Some(2));
         for kept in &limited.groups {
-            assert_eq!(kept.copies.len(), 2, "one original plus one reclaimable copy");
+            assert_eq!(
+                kept.copies.len(),
+                2,
+                "one original plus one reclaimable copy"
+            );
         }
     }
 }
@@ -414,6 +430,14 @@ mod tests {
     use super::*;
     use crate::duplicates::hashing::hash_bytes;
     use std::fs;
+
+    // Product defaults deliberately ignore tiny files; these tests exercise small real fixtures.
+    fn small_file_options() -> DuplicateOptions {
+        DuplicateOptions {
+            min_bytes: 0,
+            ..Default::default()
+        }
+    }
 
     fn record(path: &str, size: u64) -> FileRecord {
         FileRecord {
@@ -439,7 +463,7 @@ mod tests {
             record("C:\\c.bin", 200),
             record("C:\\tiny.bin", 1),
         ];
-        let options = DuplicateOptions::default();
+        let options = small_file_options();
         let groups = group_by_size(&files, &options);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, 100);
@@ -471,6 +495,7 @@ mod tests {
             record("C:\\Users\\me\\b.bin", 100),
         ];
         let options = DuplicateOptions {
+            min_bytes: 0,
             exclude_paths: vec!["C:\\Users\\me".to_string()],
             ..Default::default()
         };
@@ -487,6 +512,7 @@ mod tests {
         c.extension = Some("txt".to_string());
         let files = vec![a, b, c];
         let options = DuplicateOptions {
+            min_bytes: 0,
             extensions: vec!["mp4".to_string()],
             ..Default::default()
         };
@@ -512,7 +538,7 @@ mod tests {
             record(&two.to_string_lossy(), 12),
             record(&three.to_string_lossy(), 11),
         ];
-        let options = DuplicateOptions::default();
+        let options = small_file_options();
         let report = build_report(&files, &options, "r1".to_string(), 0, |_, _| {});
 
         assert_eq!(report.total_groups, 1);
@@ -550,7 +576,7 @@ mod tests {
         ];
         let report = build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r2".to_string(),
             0,
             |_, _| {},
@@ -568,7 +594,7 @@ mod tests {
         ];
         let report = build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r3".to_string(),
             0,
             |_, _| {},
@@ -594,7 +620,7 @@ mod tests {
         let mut seen = 0u64;
         build_report(
             &files,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r4".to_string(),
             0,
             |files, _| {
@@ -622,7 +648,7 @@ mod tests {
         }
         let report = build_report(
             &records,
-            &DuplicateOptions::default(),
+            &small_file_options(),
             "r5".to_string(),
             0,
             |_, _| {},
@@ -674,7 +700,10 @@ mod tests {
             confidence: "hash".to_string(),
         }];
         retain_existing(&mut groups);
-        assert!(groups.is_empty(), "a group with fewer than two real copies is dropped");
+        assert!(
+            groups.is_empty(),
+            "a group with fewer than two real copies is dropped"
+        );
     }
 
     #[test]

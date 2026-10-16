@@ -22,6 +22,7 @@ pub mod licensing;
 pub mod scan;
 pub mod settings;
 
+#[cfg(test)]
 pub(crate) use files::validate_path;
 
 #[cfg(test)]

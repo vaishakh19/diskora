@@ -15,7 +15,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { AlertTriangle, FolderOpen, Info, ShieldCheck, Trash2 } from 'lucide-react';
+import { FolderOpen, Info, ShieldCheck, Trash2 } from 'lucide-react';
 import { useApp } from '@/app/state';
 import { useItemMenu } from '@/app/itemMenu';
 import {
@@ -55,14 +55,14 @@ export function CleanupView(): React.JSX.Element {
   const [targetsText, setTargetsText] = useState('');
   const [targets, setTargets] = useState<string[]>([]);
   const [olderThanDays, setOlderThanDays] = useState(180);
-  const [confirm, setConfirm] = useState<{ permanent: boolean } | null>(null);
+  const [confirm, setConfirm] = useState<{ plan: CleanupPlan; token: string } | null>(null);
 
   const hasScan = scan.result !== null;
   const findings = cleanup.findings;
   const selectedIds = cleanup.selectedFindingIds;
 
   const selected = useMemo(
-    () => findings.filter((finding) => selectedIds.includes(finding.id) && !finding.protected),
+    () => findings.filter((finding) => selectedIds.includes(finding.id) && !finding.protected && finding.paths.length > 0 && finding.risk !== 'informational'),
     [findings, selectedIds],
   );
   const selectedBytes = selected.reduce((sum, finding) => sum + finding.sizeBytes, 0);
@@ -78,20 +78,34 @@ export function CleanupView(): React.JSX.Element {
     return map;
   }, [findings]);
 
-  const buildPlan = (permanent: boolean): CleanupPlan | null => {
+  const buildPlan = (): CleanupPlan | null => {
     if (selected.length === 0) return null;
     const items: CleanupPlanItem[] = selected.map((finding) => ({
       findingId: finding.id,
       paths: finding.paths,
-      action: permanent ? 'permanent' : 'recycle',
+      action: 'recycle',
     }));
-    return { scanId: cleanup.scanId ?? scan.result?.scanId ?? null, items, dryRun };
+    return { scanId: cleanup.scanId ?? scan.result?.scanId ?? null, items, dryRun: true };
   };
 
-  const run = (permanent: boolean) => {
-    const plan = buildPlan(permanent);
+  const run = async () => {
+    const plan = buildPlan();
     if (!plan) return;
-    void actions.executeCleanup(plan).then(() => setConfirm(null));
+    const preview = await actions.previewCleanup(plan);
+    if (!preview || dryRun || !preview.confirmationToken) return;
+    setConfirm({ plan, token: preview.confirmationToken });
+  };
+
+  const executeConfirmed = () => {
+    if (!confirm) return;
+    void actions.executeCleanup({
+      ...confirm.plan,
+      dryRun: false,
+      confirmationToken: confirm.token,
+      confirmed: true,
+    }).then((result) => {
+      if (result) setConfirm(null);
+    });
   };
 
   if (!hasScan) {
@@ -247,21 +261,9 @@ export function CleanupView(): React.JSX.Element {
                     }`}
               </p>
               <p className="mt-1 text-[10px] leading-relaxed text-ink-faint">{cleanup.recycleBin.detail}</p>
-              <Button
-                size="sm"
-                className="mt-2"
-                variant="secondary"
-                disabled={cleanup.executing || cleanup.recycleBin.itemCount === 0}
-                onClick={() =>
-                  void actions.executeCleanup({
-                    scanId: cleanup.scanId,
-                    items: [{ findingId: 'recycle-bin', paths: [], action: 'recycle' }],
-                    dryRun: true,
-                  })
-                }
-              >
-                Preview emptying the Recycle Bin
-              </Button>
+              <p className="mt-2 text-[10px] text-ink-faint">
+                Diskwise does not empty the Recycle Bin. Manage its contents in Windows Settings.
+              </p>
             </Panel>
           ) : null}
 
@@ -372,21 +374,12 @@ export function CleanupView(): React.JSX.Element {
               className="w-full justify-center"
               disabled={selected.length === 0 || cleanup.executing}
               loading={cleanup.executing}
-              onClick={() => run(false)}
+              onClick={() => void run()}
             >
               <Trash2 aria-hidden className="size-3.5" />
-              {dryRun ? 'Preview cleanup' : 'Move to Recycle Bin'}
+              {dryRun ? 'Preview cleanup' : 'Preview and confirm…'}
             </Button>
-            <Button
-              variant="danger"
-              className="w-full justify-center"
-              disabled={selected.length === 0 || cleanup.executing}
-              onClick={() => setConfirm({ permanent: true })}
-              title="Permanently delete the selected items. This cannot be undone."
-            >
-              <AlertTriangle aria-hidden className="size-3.5" />
-              Permanently delete…
-            </Button>
+            <p className="text-[10px] text-ink-faint">Permanent deletion is disabled pending native safety verification.</p>
             {!entitlement.features.customCleanupRules ? (
               <p className="text-[10px] leading-relaxed text-ink-faint">
                 Custom cleanup rules are part of Diskwise Pro.{' '}
@@ -401,16 +394,16 @@ export function CleanupView(): React.JSX.Element {
 
       <Modal
         open={confirm !== null}
-        title="Permanently delete these items?"
-        description="Permanent deletion bypasses the Recycle Bin and cannot be undone."
+        title="Move these files to the Recycle Bin?"
+        description="Review the exact paths below. Diskwise rechecks each file before moving it."
         onClose={() => setConfirm(null)}
         footer={
           <>
             <Button variant="ghost" onClick={() => setConfirm(null)}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => run(true)}>
-              Delete permanently
+            <Button variant="primary" onClick={executeConfirmed} loading={cleanup.executing}>
+              Confirm Recycle Bin move
             </Button>
           </>
         }
@@ -418,19 +411,19 @@ export function CleanupView(): React.JSX.Element {
         {confirm ? (
           <>
             <p className="mb-2 text-[11px] font-medium text-ink">
-              {selected.length} findings · {formatCount(selectedFiles)} items · {formatBytes(selectedBytes)}
+              {confirm.plan.items.length} findings · {formatCount(confirm.plan.items.reduce((sum, item) => sum + item.paths.length, 0))} files to move
             </p>
             <p className="mb-1 text-[11px] font-medium text-ink">Exact paths:</p>
             <ul className="max-h-40 overflow-y-auto rounded-control border border-line bg-surface-sunken p-2">
-              {selected.flatMap((finding) => finding.paths).map((path) => (
+              {confirm.plan.items.flatMap((item) => item.paths).map((path) => (
                 <li key={path} className="truncate font-mono text-[10px] text-ink-muted" title={path}>
                   {path}
                 </li>
               ))}
             </ul>
-            <Notice tone="danger" className="mt-2">
-              At least one copy of every duplicate group is always preserved, and files that changed
-              since the scan are re-checked immediately before deletion and skipped if they moved.
+            <Notice tone="warn" className="mt-2">
+              Only scanned, unchanged regular files may be moved. Directories, links, protected files
+              and anything changed since the scan are skipped and reported individually.
             </Notice>
           </>
         ) : null}
@@ -474,7 +467,7 @@ function FindingCard({
           <Checkbox
             checked={checked}
             onChange={onToggle}
-            disabled={finding.protected}
+            disabled={finding.protected || finding.risk === 'informational' || finding.paths.length === 0}
             label={<span className="sr-only">Select {finding.title}</span>}
           />
           <div className="min-w-0 flex-1">

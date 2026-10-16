@@ -46,13 +46,33 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
-    Scenario { name: "small", files: 2_000, dirs: 200 },
-    Scenario { name: "medium", files: 25_000, dirs: 2_000 },
-    Scenario { name: "large", files: 100_000, dirs: 8_000 },
+    Scenario {
+        name: "small",
+        files: 2_000,
+        dirs: 200,
+    },
+    Scenario {
+        name: "medium",
+        files: 25_000,
+        dirs: 2_000,
+    },
+    Scenario {
+        name: "large",
+        files: 100_000,
+        dirs: 8_000,
+    },
     // A realistic Windows volume: many files per folder, which is what trips the child cut and
     // produces the synthetic "Other" node.
-    Scenario { name: "wide", files: 120_000, dirs: 400 },
-    Scenario { name: "huge", files: 250_000, dirs: 20_000 },
+    Scenario {
+        name: "wide",
+        files: 120_000,
+        dirs: 400,
+    },
+    Scenario {
+        name: "huge",
+        files: 250_000,
+        dirs: 20_000,
+    },
 ];
 
 /// Builds a flat walk result shaped exactly like a real one.
@@ -105,7 +125,7 @@ fn generate(scenario: &Scenario, seed: u32) -> ScanRun {
             path: parent_path.join(format!("f{index}.{extension}")),
             name: format!("f{index}.{extension}"),
             size,
-            disk_size: Some((size + 4095) / 4096 * 4096),
+            disk_size: Some(size.div_ceil(4096) * 4096),
             modified_at: Some(1_700_000_000_000),
             extension: Some(extension.to_string()),
             parent_path,
@@ -186,8 +206,12 @@ fn main() {
         prune.max_children, prune.max_nodes
     );
     println!();
-    println!("scenario    files     dirs   input files    index ms    prune ms   pruned   over   synth");
-    println!("---------  -------  -------  ------------  ----------  ----------  -------  -----  -----");
+    println!(
+        "scenario    files     dirs   input files    index ms    prune ms   pruned   over   synth"
+    );
+    println!(
+        "---------  -------  -------  ------------  ----------  ----------  -------  -----  -----"
+    );
 
     let mut report = String::from("{\n  \"node\": \"rust\",\n  \"results\": [\n");
     let mut first = true;
@@ -224,7 +248,7 @@ fn main() {
         let mut pruned = None;
         for _ in 0..runs {
             let started = Instant::now();
-            let tree = prune_tree(&index, root, prune.clone());
+            let tree = prune_tree(&index, root, prune);
             prune_samples.push(started.elapsed().as_secs_f64() * 1000.0);
             pruned = Some(tree);
         }

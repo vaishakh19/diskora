@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Mirrors the `ScanPhase` union in `src/types/contracts.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScanPhase {
+    #[default]
     Preparing,
     Walking,
     Hashing,
@@ -68,6 +69,8 @@ pub struct ProgressCounters {
     pub bytes: AtomicU64,
     pub errors: AtomicUsize,
     pub cancelled: AtomicBool,
+    truncated: AtomicBool,
+    entries: AtomicU64,
     current_path: Mutex<String>,
     phase: Mutex<ScanPhase>,
 }
@@ -88,6 +91,38 @@ impl ProgressCounters {
 
     pub fn add_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Atomically reserves one entry so concurrent workers cannot overshoot a hard cap.
+    /// A CAS loop works on the crate's Rust 1.80 MSRV without deprecated APIs.
+    pub fn claim_entry(&self, limit: u64) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        let mut current = self.entries.load(Ordering::SeqCst);
+        loop {
+            if current >= limit {
+                return false;
+            }
+            match self.entries.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Returns true only the first time a traversal limit is reached.
+    pub fn mark_truncated(&self) -> bool {
+        !self.truncated.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        self.truncated.load(Ordering::SeqCst)
     }
 
     pub fn cancel(&self) {
@@ -134,26 +169,37 @@ impl ProgressCounters {
     }
 
     pub fn phase(&self) -> ScanPhase {
-        self.phase.lock().map(|guard| *guard).unwrap_or(ScanPhase::Preparing)
+        self.phase
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(ScanPhase::Preparing)
     }
 }
 
-/// A single progress reading.
-#[derive(Debug, Clone)]
+/// A single progress reading; the field names match `src/types/contracts.ts` exactly.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressSnapshot {
+    pub scan_id: String,
     pub phase: ScanPhase,
-    pub files: u64,
-    pub folders: u64,
-    pub bytes: u64,
+    pub status: ScanStatus,
+    pub files_scanned: u64,
+    pub folders_scanned: u64,
+    pub bytes_analyzed: u64,
     pub errors: usize,
     pub current_path: String,
     pub elapsed_ms: u64,
     pub eta_ms: Option<u64>,
     pub percent: Option<f64>,
+    pub truncated: bool,
 }
 
 /// ETA: only meaningful once more than 5% of the expected total has been seen.
-pub fn estimate(analyzed: u64, expected: Option<u64>, elapsed_ms: u64) -> (Option<f64>, Option<u64>) {
+pub fn estimate(
+    analyzed: u64,
+    expected: Option<u64>,
+    elapsed_ms: u64,
+) -> (Option<f64>, Option<u64>) {
     let expected = match expected {
         Some(value) if value > 0 => value,
         _ => return (None, None),
@@ -174,6 +220,25 @@ pub fn estimate(analyzed: u64, expected: Option<u64>, elapsed_ms: u64) -> (Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn entry_claims_never_exceed_the_cap_even_with_parallel_workers() {
+        let counters = Arc::new(ProgressCounters::new());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counters = Arc::clone(&counters);
+                std::thread::spawn(move || (0..100).filter(|_| counters.claim_entry(37)).count())
+            })
+            .collect();
+        let claimed: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        assert_eq!(claimed, 37);
+        assert_eq!(counters.entries.load(Ordering::SeqCst), 37);
+        assert!(!counters.claim_entry(37));
+    }
 
     #[test]
     fn eta_is_unknown_below_five_percent() {

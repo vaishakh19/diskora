@@ -44,9 +44,8 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let state = AppState::new();
+            let mut state = AppState::new();
 
             // The database lives in the app's own data directory. Scanning works without it.
             let data_dir = app
@@ -70,6 +69,7 @@ pub fn run() {
             // Resolve the entitlement from any stored licence key, entirely offline. A failure here
             // leaves the app on the free tier, which is a complete product.
             let device = crate::licensing::payload::DeviceBinding::current(&data_dir);
+            state.set_device(device.clone());
             let stored_key = state.stored_license_key().ok().flatten();
             let now = crate::licensing::verify::now_millis();
             let authorization = crate::authz::Authorization::resolve(

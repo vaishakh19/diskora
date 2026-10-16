@@ -82,8 +82,8 @@ pub fn recycle_bin(_drive_root: Option<&str>) -> RecycleBinInfo {
     }
 }
 
-pub fn open_with_default_app(_path: &Path) -> Result<(), String> {
-    Err("Opening files with the default application is only available on Windows.".to_string())
+pub fn open_folder_in_explorer(_path: &Path) -> Result<(), String> {
+    Err("Opening folders in File Explorer is only available on Windows.".to_string())
 }
 
 pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {

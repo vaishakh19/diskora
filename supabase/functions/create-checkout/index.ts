@@ -53,7 +53,17 @@ Deno.serve(async (request) => {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   const dodoKey = Deno.env.get('DODO_PAYMENTS_API_KEY');
-  const environment = (Deno.env.get('DODO_ENVIRONMENT') ?? 'test') as 'test' | 'live';
+  const environment = Deno.env.get('DODO_ENVIRONMENT') ?? 'test';
+
+  // The live fulfilment path is not deployable yet: dodo-webhook generates an opaque key, stores
+  // only its hash, never delivers it, and does not sign the payload the desktop app accepts. Do not
+  // take real money until signing, delivery, reconciliation and provider verification are built and
+  // exercised end-to-end. This is deliberately a code gate, not an environment flag that an
+  // operator can accidentally enable while configuring Dodo.
+  if (environment !== 'test') {
+    log('create-checkout.live-disabled', { requestId: id });
+    return fail(origin, 503, 'Checkout is unavailable right now. Please try again later.', id);
+  }
 
   if (!supabaseUrl || !serviceKey || !dodoKey) {
     // A missing configuration is a server fault. The client gets the same generic message it would

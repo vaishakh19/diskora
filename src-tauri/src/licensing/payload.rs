@@ -111,15 +111,36 @@ pub struct ParsedLicense {
 pub enum LicenseError {
     Empty,
     Malformed(&'static str),
-    UnknownSchema { found: u32, supported: u32 },
-    UnknownKey { key_id: String },
+    UnknownSchema {
+        found: u32,
+        supported: u32,
+    },
+    UnknownKey {
+        key_id: String,
+    },
     BadSignature,
-    WrongProduct { expected: String, found: String },
-    UnknownTier { tier_id: String },
-    NotYetValid { issued_at: i64, now: i64 },
-    LeaseLapsed { until: i64, now: i64 },
-    WrongDevice { expected: String, found: Option<String> },
-    DeviceLimitExceeded { limit: u32 },
+    WrongProduct {
+        expected: String,
+        found: String,
+    },
+    UnknownTier {
+        tier_id: String,
+    },
+    NotYetValid {
+        issued_at: i64,
+        now: i64,
+    },
+    LeaseLapsed {
+        until: i64,
+        now: i64,
+    },
+    WrongDevice {
+        expected: String,
+        found: Option<String>,
+    },
+    DeviceLimitExceeded {
+        limit: u32,
+    },
 }
 
 impl LicenseError {
@@ -191,8 +212,8 @@ pub fn parse(key: &str) -> Result<ParsedLicense, LicenseError> {
         return Err(LicenseError::Malformed("signature is not 64 bytes"));
     }
 
-    let payload: LicensePayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| LicenseError::Malformed("payload is not JSON"))?;
+    let payload: LicensePayload = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| LicenseError::Malformed("payload is not JSON"))?;
 
     Ok(ParsedLicense {
         payload,
@@ -226,7 +247,11 @@ pub fn verify(
             key_id: payload.key_id.clone(),
         })?;
 
-    if !signature_valid(&parsed.payload_bytes(), &parsed.signature, &trusted.public_key_base64) {
+    if !signature_valid(
+        &parsed.payload_bytes(),
+        &parsed.signature,
+        &trusted.public_key_base64,
+    ) {
         return Err(LicenseError::BadSignature);
     }
 
@@ -321,7 +346,8 @@ impl ParsedLicense {
 
 /// Encodes a payload and signature into a licence key. Used by the backend and by the tests.
 pub fn encode(payload: &LicensePayload, signature: &[u8]) -> String {
-    let encoded_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes(payload));
+    let encoded_payload =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes(payload));
     let encoded_signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
     format!("{encoded_payload}.{encoded_signature}")
 }
@@ -332,7 +358,14 @@ pub fn mask_key(key: &str) -> String {
     if trimmed.chars().count() <= 4 {
         return "****".to_string();
     }
-    let visible: String = trimmed.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let visible: String = trimmed
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let hidden = "*".repeat(trimmed.chars().count().saturating_sub(4));
     format!("{hidden}{visible}")
 }
@@ -548,8 +581,8 @@ mod tests {
 
     #[test]
     fn an_empty_key_is_rejected() {
-        assert_eq!(parse(""), Err(LicenseError::Empty));
-        assert_eq!(parse("   "), Err(LicenseError::Empty));
+        assert!(matches!(parse(""), Err(LicenseError::Empty)));
+        assert!(matches!(parse("   "), Err(LicenseError::Empty)));
     }
 
     #[test]
@@ -564,16 +597,14 @@ mod tests {
 
     #[test]
     fn a_non_base64_payload_is_rejected() {
-        assert!(matches!(
-            parse("!!!.???"),
-            Err(LicenseError::Malformed(_))
-        ));
+        assert!(matches!(parse("!!!.???"), Err(LicenseError::Malformed(_))));
     }
 
     #[test]
     fn a_short_signature_is_rejected() {
         let payload = base_payload();
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes(&payload));
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes(&payload));
         let short = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 10]);
         assert!(matches!(
             parse(&format!("{encoded}.{short}")),
@@ -613,7 +644,10 @@ mod tests {
         let other = SigningKey::from_bytes(&[9u8; 32]);
         let key = encode(&payload, &sign(&other, &payload));
         let parsed = parse(&key).expect("parses");
-        assert_eq!(verify(&parsed, &config, NOW, None), Err(LicenseError::BadSignature));
+        assert_eq!(
+            verify(&parsed, &config, NOW, None),
+            Err(LicenseError::BadSignature)
+        );
     }
 
     #[test]
@@ -623,7 +657,10 @@ mod tests {
         let payload = base_payload();
         let key = encode(&payload, &[0u8; 64]);
         let parsed = parse(&key).expect("parses");
-        assert_eq!(verify(&parsed, &config, NOW, None), Err(LicenseError::BadSignature));
+        assert_eq!(
+            verify(&parsed, &config, NOW, None),
+            Err(LicenseError::BadSignature)
+        );
     }
 
     #[test]
@@ -639,7 +676,10 @@ mod tests {
         let key = encode(&tampered, &signature);
 
         let parsed = parse(&key).expect("parses");
-        assert_eq!(verify(&parsed, &config, NOW, None), Err(LicenseError::BadSignature));
+        assert_eq!(
+            verify(&parsed, &config, NOW, None),
+            Err(LicenseError::BadSignature)
+        );
     }
 
     #[test]
@@ -806,7 +846,7 @@ mod tests {
 
     #[test]
     fn masking_reveals_only_the_last_four_characters() {
-        assert_eq!(mask_key("ABCD-1234-EFGH-5678"), "****************5678");
+        assert_eq!(mask_key("ABCD-1234-EFGH-5678"), "***************5678");
         assert_eq!(mask_key("abcd"), "****");
         assert_eq!(mask_key(""), "****");
     }
@@ -881,8 +921,7 @@ mod tests {
     #[test]
     fn the_activation_record_path_is_inside_the_data_directory() {
         let dir = std::path::PathBuf::from("C:\\Users\\me\\AppData\\Roaming\\com.diskwise.app");
-        assert!(activation_record_path(&dir)
-            .starts_with(&dir));
+        assert!(activation_record_path(&dir).starts_with(&dir));
     }
 
     /* --------------------------------- messages --------------------------------- */

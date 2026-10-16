@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::filesystem::long_path::to_unc_long_path;
 use crate::duplicates::hashing::HASH_BUFFER_BYTES;
+use crate::filesystem::long_path::to_unc_long_path;
 
 /// Mirrors `DuplicateVerifyResult` in `src/types/contracts.ts`.
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +70,8 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("diskwise-verify-{name}-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("diskwise-verify-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base

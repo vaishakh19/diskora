@@ -16,7 +16,7 @@ pub mod progress;
 pub mod walker;
 
 pub use aggregate::{
-    prune_tree, DirectoryAggregate, ScanIndex, TreeNode, PruneOptions, DEFAULT_MAX_CHILDREN,
+    prune_tree, DirectoryAggregate, PruneOptions, ScanIndex, TreeNode, DEFAULT_MAX_CHILDREN,
     DEFAULT_MAX_NODES, OTHER_NODE_SUFFIX,
 };
 pub use progress::{ProgressCounters, ProgressSnapshot, ScanPhase, ScanStatus};

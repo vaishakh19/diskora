@@ -82,7 +82,9 @@ pub fn settings_update(
                     current.confirm_before_cleanup = value.as_bool().unwrap_or(true)
                 }
                 "preferRecycleBin" => current.prefer_recycle_bin = value.as_bool().unwrap_or(true),
-                "largeUnusedDays" => current.large_unused_days = value.as_u64().unwrap_or(180) as u32,
+                "largeUnusedDays" => {
+                    current.large_unused_days = value.as_u64().unwrap_or(180) as u32
+                }
                 "cachePaths" => {
                     current.cache_paths = value
                         .as_array()
@@ -205,14 +207,35 @@ pub fn app_version(app: tauri::AppHandle) -> AppVersion {
     }
 }
 
+/// Bootstrap helper: reads settings without a `State` wrapper.
+pub(crate) fn settings_get_for_bootstrap(state: &AppState) -> Result<AppSettings, AppError> {
+    let stored = {
+        let guard = state
+            .database
+            .lock()
+            .map_err(|_| AppError::Internal("The database lock was poisoned.".to_string()))?;
+        guard
+            .as_ref()
+            .and_then(|database| database.load_settings().ok().flatten())
+    };
+    Ok(match stored {
+        Some(payload) => serde_json::from_str::<AppSettings>(&payload)
+            .map(|settings| settings.normalized())
+            .unwrap_or_default(),
+        None => AppSettings::default(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_partial_patch_only_touches_the_fields_it_names() {
-        let mut settings = AppSettings::default();
-        settings.follow_links = true;
+        let mut settings = AppSettings {
+            follow_links: true,
+            ..Default::default()
+        };
         let patch = serde_json::json!({ "theme": "dark" });
         if let Some(object) = patch.as_object() {
             for (key, value) in object {
@@ -227,9 +250,11 @@ mod tests {
 
     #[test]
     fn privacy_reports_are_honest_about_crash_reporting() {
-        let mut settings = AppSettings::default();
-        assert!(!settings.crash_reporting);
-        settings.crash_reporting = true;
+        assert!(!AppSettings::default().crash_reporting);
+        let settings = AppSettings {
+            crash_reporting: true,
+            ..Default::default()
+        };
         assert!(settings.crash_reporting);
     }
 
@@ -255,25 +280,4 @@ mod tests {
             "tauri.conf.json must declare \"identifier\": \"{APP_IDENTIFIER}\""
         );
     }
-}
-
-/// Bootstrap helper: reads settings without a `State` wrapper.
-pub(crate) fn settings_get_for_bootstrap(
-    state: &AppState,
-) -> Result<AppSettings, AppError> {
-    let stored = {
-        let guard = state
-            .database
-            .lock()
-            .map_err(|_| AppError::Internal("The database lock was poisoned.".to_string()))?;
-        guard
-            .as_ref()
-            .and_then(|database| database.load_settings().ok().flatten())
-    };
-    Ok(match stored {
-        Some(payload) => serde_json::from_str::<AppSettings>(&payload)
-            .map(|settings| settings.normalized())
-            .unwrap_or_default(),
-        None => AppSettings::default(),
-    })
 }

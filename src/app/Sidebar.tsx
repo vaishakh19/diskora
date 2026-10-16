@@ -19,6 +19,7 @@ import {
   HardDrive,
   History,
   Home,
+  KeyRound,
   Play,
   Settings,
   Sparkles,
@@ -40,6 +41,7 @@ const NAV: Array<{ route: Route; label: string; icon: typeof Home; pro?: boolean
   { route: 'duplicates', label: 'Duplicate Finder', icon: Copy },
   { route: 'cleanup', label: 'Cleanup Suggestions', icon: Trash2 },
   { route: 'history', label: 'Scan History', icon: History, pro: true },
+  { route: 'licensing', label: 'Plans & licence', icon: KeyRound },
   { route: 'settings', label: 'Settings', icon: Settings },
 ];
 

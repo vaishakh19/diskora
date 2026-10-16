@@ -95,7 +95,11 @@ const PROTECTED_CATEGORIES: &[&str] = &[
 ///
 /// Built-in suggestions only cover the Recycle Bin and anything inside a user-configured rule path.
 /// Everything else the scan found is reported as informational with an explanation.
-pub fn build_findings(index: &ScanIndex, rules: &[CleanupRule], now_ms: i64) -> Vec<CleanupFinding> {
+pub fn build_findings(
+    index: &ScanIndex,
+    rules: &[CleanupRule],
+    now_ms: i64,
+) -> Vec<CleanupFinding> {
     let mut findings: Vec<CleanupFinding> = Vec::new();
 
     for rule in rules.iter().filter(|rule| rule.enabled) {
@@ -157,7 +161,7 @@ pub fn build_findings(index: &ScanIndex, rules: &[CleanupRule], now_ms: i64) -> 
         });
     }
 
-    findings.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    findings.sort_by_key(|finding| std::cmp::Reverse(finding.size_bytes));
     findings
 }
 
@@ -205,9 +209,9 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
     let mut paths: Vec<String> = Vec::new();
     let mut size_bytes = 0u64;
     let mut file_count = 0u64;
-    let mut folder_count = 0u64;
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
+    let mut contains_protected = false;
 
     // Walk the subtree (iteratively) collecting the files the rule selects.
     let mut stack = vec![position];
@@ -229,6 +233,9 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
                     _ => continue,
                 }
             }
+            // The rule's category is caller-controlled; any protected file makes the whole
+            // suggestion informational. It must never become an executable finding.
+            contains_protected |= crate::cleanup::execute::protected_path(&file.path);
             paths.push(file.path.to_string_lossy().to_string());
             size_bytes += file.size;
             file_count += 1;
@@ -247,12 +254,16 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
     if file_count == 0 {
         return None;
     }
+    // The Tauri command does exact membership checks with a binary search before accepting a
+    // preview, so never let UI display order affect authorization.
+    paths.sort_unstable();
+    let folder_count = folder_count_hint(&paths);
 
     // A rule is never allowed to lower itself below "needs review", and a protected category can
     // only ever be informational.
-    let protected = PROTECTED_CATEGORIES.contains(&rule.category.as_str())
-        || rule.category == "system"
-        || rule.category == "applications";
+    let protected = contains_protected
+        || crate::cleanup::execute::protected_path(&root)
+        || PROTECTED_CATEGORIES.contains(&rule.category.as_str());
     let risk = if protected {
         "informational".to_string()
     } else {
@@ -262,7 +273,7 @@ fn finding_for_rule(index: &ScanIndex, rule: &CleanupRule, now_ms: i64) -> Optio
         }
     };
 
-    let reason = build_reason(rule, file_count, folder_count_hint(&paths), cutoff, now_ms);
+    let reason = build_reason(rule, file_count, folder_count, cutoff, now_ms);
 
     Some(CleanupFinding {
         id: format!("rule-{}", rule.id),
@@ -291,21 +302,35 @@ fn folder_count_hint(paths: &[String]) -> u64 {
         .len() as u64
 }
 
-fn build_reason(rule: &CleanupRule, file_count: u64, folder_count: u64, cutoff: Option<i64>, _now: i64) -> String {
+fn build_reason(
+    rule: &CleanupRule,
+    file_count: u64,
+    folder_count: u64,
+    cutoff: Option<i64>,
+    _now: i64,
+) -> String {
     let mut parts: Vec<String> = vec![format!(
         "{} files in {} folder(s) inside {} match your rule.",
         file_count, folder_count, rule.path
     )];
     if let Some(cutoff) = cutoff {
         let days = rule.older_than_days;
-        parts.push(format!("Only files last modified more than {days} days ago are included."));
+        parts.push(format!(
+            "Only files last modified more than {days} days ago are included."
+        ));
         let _ = cutoff;
     }
     if rule.min_bytes > 0 {
-        parts.push(format!("Only files at least {} bytes are included.", rule.min_bytes));
+        parts.push(format!(
+            "Only files at least {} bytes are included.",
+            rule.min_bytes
+        ));
     }
     if !rule.extensions.is_empty() {
-        parts.push(format!("Only these extensions: {}.", rule.extensions.join(", ")));
+        parts.push(format!(
+            "Only these extensions: {}.",
+            rule.extensions.join(", ")
+        ));
     }
     parts.push("Nothing here is deleted automatically.".to_string());
     parts.join(" ")
@@ -320,7 +345,8 @@ mod tests {
     use std::sync::Arc;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("diskwise-cleanup-{name}-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("diskwise-cleanup-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base
@@ -363,6 +389,10 @@ mod tests {
             .find(|finding| finding.id == "rule-r1")
             .expect("a finding for the rule");
         assert_eq!(finding.file_count, 1);
+        assert_eq!(
+            finding.folder_count, 1,
+            "count the file's parent folder in the finding"
+        );
         assert_eq!(finding.size_bytes, 100);
         assert!(finding.paths[0].contains("temp"));
         assert!(!finding.paths.iter().any(|path| path.contains("docs")));
@@ -379,7 +409,8 @@ mod tests {
         fs::write(&old, vec![0u8; 10]).unwrap();
         fs::write(&new, vec![0u8; 10]).unwrap();
         // Make one file old by touching its timestamp far in the past.
-        let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let past =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         let file = fs::OpenOptions::new().write(true).open(&old).unwrap();
         let _ = file.set_times(fs::FileTimes::new().set_modified(past).set_accessed(past));
 

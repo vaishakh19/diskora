@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::config::product::{CommercialConfig, ProductTier};
-use crate::licensing::payload::{LicensePayload, LicenseError};
+use crate::licensing::payload::{LicenseError, LicensePayload};
 
 /// Mirrors `PlanTier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +268,9 @@ pub fn apply_offline_grace(entitlement: Entitlement, now: i64) -> Entitlement {
     if let Some(until) = entitlement.lease_until {
         if now >= until {
             entitlement.state = EntitlementState::ProExpired;
+            entitlement.tier = PlanTier::Free;
             entitlement.features = FeatureFlags::free();
+            entitlement.duplicate_group_limit = FREE_DUPLICATE_GROUP_LIMIT;
             entitlement.reason = Some(
                 "This licence needs to be re-verified with the licence server. Connect to the internet and re-activate; your purchase is not affected."
                     .to_string(),
@@ -302,7 +304,8 @@ pub fn from_cache(payload_json: &str) -> Entitlement {
         let mut entitlement = free_entitlement();
         entitlement.state = EntitlementState::Invalid;
         entitlement.reason = Some(
-            "The stored licence could not be read. Re-activate to restore your purchase.".to_string(),
+            "The stored licence could not be read. Re-activate to restore your purchase."
+                .to_string(),
         );
         entitlement
     })
@@ -372,7 +375,10 @@ mod tests {
         let entitlement = free_entitlement();
         assert_eq!(entitlement.state, EntitlementState::Free);
         assert!(entitlement.features.core_analysis);
-        assert_eq!(entitlement.duplicate_group_limit, FREE_DUPLICATE_GROUP_LIMIT);
+        assert_eq!(
+            entitlement.duplicate_group_limit,
+            FREE_DUPLICATE_GROUP_LIMIT
+        );
         assert!(!entitlement.features.scan_history);
         assert!(!entitlement.permanent);
     }
@@ -419,7 +425,10 @@ mod tests {
         assert!(!entitlement.state.is_paid());
         // Ownership is still recorded, so the UI can say so.
         assert!(entitlement.permanent);
-        assert!(entitlement.reason.unwrap().contains("purchase is not affected"));
+        assert!(entitlement
+            .reason
+            .unwrap()
+            .contains("purchase is not affected"));
     }
 
     #[test]
@@ -427,7 +436,10 @@ mod tests {
         assert_eq!(EntitlementState::ProActive.as_str(), "pro-active");
         assert_eq!(EntitlementState::ProExpired.as_str(), "pro-expired");
         assert_eq!(EntitlementState::Invalid.as_str(), "invalid");
-        assert_eq!(EntitlementState::parse("pro-active"), EntitlementState::ProActive);
+        assert_eq!(
+            EntitlementState::parse("pro-active"),
+            EntitlementState::ProActive
+        );
         assert_eq!(EntitlementState::parse("nonsense"), EntitlementState::Free);
         assert_eq!(PlanTier::Pro.as_str(), "pro");
     }
@@ -454,7 +466,13 @@ mod tests {
         cached.lease_until = Some(1_000);
         let resolved = apply_offline_grace(cached, NOW);
         assert_eq!(resolved.state, EntitlementState::ProExpired);
+        assert_eq!(resolved.tier, PlanTier::Free);
+        assert_eq!(resolved.duplicate_group_limit, FREE_DUPLICATE_GROUP_LIMIT);
         assert!(!resolved.features.scan_history);
+        assert!(
+            resolved.permanent,
+            "a lapsed lease does not revoke ownership"
+        );
     }
 
     #[test]

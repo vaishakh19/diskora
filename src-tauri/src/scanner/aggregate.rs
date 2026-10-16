@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::filesystem::classify;
-use crate::scanner::walker::{DirectoryRecord, FileRecord, ScanRun};
+use crate::filesystem::{classify, FileRecord};
+use crate::scanner::walker::{DirectoryRecord, ScanRun};
 
 /// Children kept per folder in the tree sent to the UI.
 pub const DEFAULT_MAX_CHILDREN: usize = 100;
@@ -89,8 +89,9 @@ impl ScanIndex {
             if let Some(directory) = index.get(&file.parent_path) {
                 let aggregate = &mut aggregates[*directory];
                 aggregate.size_bytes += file.size;
-                aggregate.disk_size_bytes =
-                    Some(aggregate.disk_size_bytes.unwrap_or(0) + file.disk_size.unwrap_or(file.size));
+                aggregate.disk_size_bytes = Some(
+                    aggregate.disk_size_bytes.unwrap_or(0) + file.disk_size.unwrap_or(file.size),
+                );
                 aggregate.file_count += 1;
             }
         }
@@ -109,12 +110,18 @@ impl ScanIndex {
         for position in order {
             let (size, files, folders, disk) = {
                 let aggregate = &aggregates[position];
-                (aggregate.size_bytes, aggregate.file_count, aggregate.folder_count, aggregate.disk_size_bytes)
+                (
+                    aggregate.size_bytes,
+                    aggregate.file_count,
+                    aggregate.folder_count,
+                    aggregate.disk_size_bytes,
+                )
             };
             if let Some(parent) = directories[position].parent {
                 let parent_aggregate = &mut aggregates[parent];
                 parent_aggregate.size_bytes += size;
-                parent_aggregate.disk_size_bytes = Some(parent_aggregate.disk_size_bytes.unwrap_or(0) + disk.unwrap_or(size));
+                parent_aggregate.disk_size_bytes =
+                    Some(parent_aggregate.disk_size_bytes.unwrap_or(0) + disk.unwrap_or(size));
                 parent_aggregate.file_count += files;
                 parent_aggregate.folder_count += folders + 1;
             }
@@ -244,33 +251,61 @@ pub struct PruneResult {
 /// equivalent: `src/lib/tree.test.ts` asserts the monotonicity the search relies on, and the
 /// benchmark in `src-tauri/src/bin/bench.rs` measures the cost.
 pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> PruneResult {
-    let max_children = options.max_children.max(2);
-    let max_nodes = options.max_nodes.max(max_children + 1);
+    if root >= index.directories.len() {
+        // Never index an empty/invalid scan result; do not invent filesystem measurements.
+        return PruneResult {
+            tree: TreeNode {
+                id: stable_path_id(Path::new("")),
+                path: String::new(),
+                name: "Scan data unavailable".to_string(),
+                kind: "folder".to_string(),
+                size_bytes: 0,
+                disk_size_bytes: None,
+                file_count: 0,
+                folder_count: 0,
+                modified_at: None,
+                created_at: None,
+                extension: None,
+                category: "other".to_string(),
+                access_denied: false,
+                children: Vec::new(),
+                synthetic: true,
+            },
+            pruned_nodes: 0,
+            truncated: false,
+        };
+    }
+
+    let max_nodes = options.max_nodes.max(1);
+    let max_children = options
+        .max_children
+        .max(2)
+        .min(max_nodes.saturating_sub(1).max(2));
 
     let depth = index_depth(index, root);
-    let mut result = build_limited(index, root, max_children, depth);
-    if count_nodes(&result.tree) <= max_nodes {
-        return finish(result);
+    let full_tree = build_limited(index, root, max_children, depth);
+    if count_nodes(&full_tree.tree) <= max_nodes {
+        return finish(full_tree);
     }
 
     // The tree is too big, so the depth has to come down.
     let mut low = 1usize;
     let mut high = depth.saturating_sub(1).max(1);
     while low < high {
-        let middle = low + (high - low + 1) / 2;
+        let middle = low + (high - low).div_ceil(2);
         let candidate = build_limited(index, root, max_children, middle);
         if count_nodes(&candidate.tree) <= max_nodes {
             low = middle;
-            result = candidate;
         } else {
             high = middle - 1;
         }
     }
 
-    // Rebuild once at the deepest level that fits, so the returned result is the best one found.
-    result = build_limited(index, root, max_children, low);
-    if count_nodes(&result.tree) > max_nodes && low > 1 {
-        result = build_limited(index, root, max_children, 1);
+    // Rebuild once at the deepest level that fits. Even the shallowest visible children may
+    // exceed a tiny budget, in which case only the root's honest aggregate totals can fit.
+    let mut result = build_limited(index, root, max_children, low);
+    if count_nodes(&result.tree) > max_nodes {
+        result = build_limited(index, root, max_children, 0);
     }
     finish(result)
 }
@@ -326,11 +361,9 @@ fn build_node(
 
     if depth >= max_depth {
         // Everything below this point is folded into the node's totals.
-        *pruned_nodes += subtree_size(index, position);
+        *pruned_nodes += subtree_size(index, position).saturating_sub(1);
         return node;
     }
-
-    let mut children: Vec<TreeNode> = Vec::new();
 
     // Folders first (biggest first), then the folder's own files.
     let child_dirs: Vec<usize> = index.children_of(position).to_vec();
@@ -338,7 +371,14 @@ fn build_node(
 
     let mut candidates: Vec<TreeNode> = Vec::with_capacity(child_dirs.len() + child_files.len());
     for child in &child_dirs {
-        candidates.push(build_node(index, *child, depth + 1, max_children, max_depth, pruned_nodes));
+        candidates.push(build_node(
+            index,
+            *child,
+            depth + 1,
+            max_children,
+            max_depth,
+            pruned_nodes,
+        ));
     }
     for file in &child_files {
         candidates.push(file_node(file));
@@ -350,7 +390,11 @@ fn build_node(
     }
 
     // Keep the biggest consumers; fold the rest into one honest aggregate node.
-    candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| a.path.cmp(&b.path)));
+    candidates.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let keep = max_children - 1;
     let dropped: Vec<TreeNode> = candidates.split_off(keep);
     *pruned_nodes += dropped.len();
@@ -362,7 +406,12 @@ fn build_node(
         .map(|node| node.folder_count + if node.kind == "folder" { 1 } else { 0 })
         .sum();
     let dropped_disk: Option<u64> = if dropped.iter().any(|node| node.disk_size_bytes.is_some()) {
-        Some(dropped.iter().map(|node| node.disk_size_bytes.unwrap_or(0)).sum())
+        Some(
+            dropped
+                .iter()
+                .map(|node| node.disk_size_bytes.unwrap_or(0))
+                .sum(),
+        )
     } else {
         None
     };
@@ -431,6 +480,13 @@ fn index_depth(index: &ScanIndex, root: usize) -> usize {
     let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
     while let Some((position, depth)) = stack.pop() {
         deepest = deepest.max(depth);
+        // The tree includes files as one more level below their parent directory.
+        if index
+            .files_by_parent
+            .contains_key(&index.directories[position].path)
+        {
+            deepest = deepest.max(depth + 1);
+        }
         for child in index.children_of(position) {
             stack.push((*child, depth + 1));
         }
@@ -455,7 +511,7 @@ pub fn stable_path_id(path: &Path) -> String {
     let bytes = path.to_string_lossy().as_bytes().to_vec();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
-        hash ^= *byte as u64;
+        hash ^= byte as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
@@ -571,6 +627,40 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_root_fits_a_budget_smaller_than_the_child_limit() {
+        let root = temp_dir("wide-budget");
+        for index in 0..30 {
+            fs::write(root.join(format!("f{index}.bin")), [1u8]).unwrap();
+        }
+        let index = ScanIndex::from_run(&scan(&root));
+        let position = index.position_of(&root).unwrap();
+        let result = prune_tree(
+            &index,
+            position,
+            PruneOptions {
+                max_children: 100,
+                max_nodes: 10,
+            },
+        );
+        assert_eq!(count_nodes(&result.tree), 10);
+        assert_eq!(result.tree.size_bytes, 30);
+        assert!(result.truncated);
+        assert!(result.tree.children.iter().any(|child| child.synthetic));
+        let root_only = prune_tree(
+            &index,
+            position,
+            PruneOptions {
+                max_children: 100,
+                max_nodes: 1,
+            },
+        );
+        assert_eq!(count_nodes(&root_only.tree), 1);
+        assert_eq!(root_only.tree.size_bytes, 30);
+        assert_eq!(root_only.pruned_nodes, 30);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn the_node_budget_is_respected() {
         let root = temp_dir("budget");
         fs::create_dir_all(&root).unwrap();
@@ -668,9 +758,15 @@ mod tests {
                 },
             );
             let nodes = count_nodes(&result.tree);
-            assert!(nodes <= max_nodes, "{nodes} nodes exceeds the budget of {max_nodes}");
+            assert!(
+                nodes <= max_nodes,
+                "{nodes} nodes exceeds the budget of {max_nodes}"
+            );
             // Monotone: tightening the budget never produces a bigger tree.
-            assert!(nodes <= previous, "the node count grew when the budget tightened");
+            assert!(
+                nodes <= previous,
+                "the node count grew when the budget tightened"
+            );
             previous = nodes;
         }
     }
@@ -733,6 +829,11 @@ mod tests {
         let index = ScanIndex::default();
         let result = prune_tree(&index, 0, PruneOptions::default());
         assert_eq!(count_nodes(&result.tree), 1);
+        assert_eq!(result.tree.size_bytes, 0);
+        assert!(
+            result.tree.synthetic,
+            "an empty index is not a real disk folder"
+        );
         assert!(!result.truncated);
     }
 

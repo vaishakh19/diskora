@@ -5,12 +5,12 @@
  * state, but never decides it. A license check can never block scanning — the free tier is a
  * complete product on its own.
  *
- * Plans and prices below are the proposed experiments from the product brief, not verified market
- * pricing, and are labelled as such.
+ * Sales and delivery are incomplete: the price shown is the configured lifetime-tier price,
+ * not a working checkout. All purchase buttons remain disabled until verified fulfilment ships.
  */
 
 import { useState } from 'react';
-import { BadgeCheck, Check, CreditCard, KeyRound, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { BadgeCheck, Check, KeyRound, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useApp } from '@/app/state';
 import { Badge, Button, Notice, Panel, SectionTitle, TextField, cx } from '@/components/ui/primitives';
 import { formatCount, formatDateTime, formatRelativeTime } from '@/lib/format';
@@ -21,17 +21,15 @@ const FREE_FEATURES: Array<{ label: string; key: keyof FeatureFlags }> = [
   { label: 'Unlimited manual scans of any drive or folder', key: 'coreAnalysis' },
   { label: 'Sunburst, treemap and file-list views', key: 'coreAnalysis' },
   { label: 'Large file finder with size, type and age filters', key: 'coreAnalysis' },
-  { label: 'Basic duplicate detection with a configurable group limit', key: 'advancedDuplicates' },
-  { label: 'Cleanup suggestions for folders you choose', key: 'customCleanupRules' },
+  { label: 'Basic duplicate detection (up to 25 groups)', key: 'coreAnalysis' },
+  { label: 'Cleanup previews for folders you choose', key: 'coreAnalysis' },
   { label: 'Copy path and Reveal in File Explorer', key: 'coreAnalysis' },
 ];
 
 const PRO_FEATURES: Array<{ label: string; key: keyof FeatureFlags }> = [
   { label: 'Unlimited duplicate groups, batch review and byte-for-byte verification', key: 'advancedDuplicates' },
   { label: 'Saved scan history and historical comparison', key: 'scanHistory' },
-  { label: 'Scheduled scans', key: 'scheduledScans' },
   { label: 'Advanced file filters (type + age analytics)', key: 'advancedFilters' },
-  { label: 'Exportable reports (CSV / JSON / HTML)', key: 'exportReports' },
   { label: 'Custom cleanup rules', key: 'customCleanupRules' },
 ];
 
@@ -46,8 +44,8 @@ export function LicensingView(): React.JSX.Element {
       <header className="border-b border-line bg-surface px-4 py-3">
         <h1 className="text-[13px] font-semibold text-ink">Plans and licence</h1>
         <p className="mt-0.5 text-[10px] text-ink-faint">
-          Basic usefulness never requires payment. Free scanning, visualization and manual cleanup
-          work with no account and no internet connection.
+          Basic scanning, visualization, file inspection and cleanup previews require no payment.
+          Live Pro purchases are not available yet.
         </p>
       </header>
 
@@ -67,14 +65,8 @@ export function LicensingView(): React.JSX.Element {
             <Row label="Tier" value={entitlement.tier} />
             <Row label="Source" value={entitlement.source} />
             <Row
-              label="Expires"
-              value={
-                entitlement.leaseUntil === null
-                  ? entitlement.permanent
-                    ? 'never'
-                    : 'not yet verified'
-                  : formatDateTime(entitlement.leaseUntil)
-              }
+              label="Offline lease"
+              value={entitlement.leaseUntil === null ? 'not set' : formatDateTime(entitlement.leaseUntil)}
             />
             <Row
               label="Verified"
@@ -103,8 +95,8 @@ export function LicensingView(): React.JSX.Element {
             }}
           >
             <TextField
-              label="Licence key"
-              placeholder="XXXX-XXXX-XXXX-XXXX"
+              label="Signed licence payload"
+              placeholder="payload.signature"
               value={key}
               onChange={(event) => setKey(event.target.value)}
               className="h-8 w-72 font-mono text-[12px]"
@@ -120,9 +112,9 @@ export function LicensingView(): React.JSX.Element {
             ) : null}
           </form>
           <p className="mt-2 text-[10px] leading-relaxed text-ink-faint">
-            Keys are verified offline against a bundled public key. Diskwise never contains a
-            payment secret or a private signing key, and never asks you to sign in to scan. Cached
-            entitlements keep working offline until they expire.
+            Only a previously issued, correctly signed device payload can activate here. The live
+            purchase, delivery and recovery flow is not connected. Scanning stays free and never
+            requires an account.
           </p>
         </Panel>
 
@@ -138,21 +130,21 @@ export function LicensingView(): React.JSX.Element {
             cta={paid ? 'Included' : 'Current plan'}
           />
           <PlanCard
-            title="Diskwise Pro"
-            price="₹149–249 / month"
-            period="₹999–1,499 / year proposed"
+            title="Diskwise Pro (planned)"
+            price="₹1,499 one time"
+            period="Configured price; checkout disabled"
             features={PRO_FEATURES}
             entitlement={entitlement}
             active={paid}
             highlight
-            cta={paid ? 'Active' : 'Upgrade'}
+            cta={paid ? 'Active' : 'Not available for purchase'}
           />
         </div>
 
         <Notice tone="warn" className="mb-3">
-          Prices above are the proposed experiments from the product brief. They are not verified
-          market prices, and a lifetime tier is only being considered once support and update costs
-          are known.
+          Pro is not for sale: live checkout is disabled until payment verification, signed licence
+          delivery, activation and refund recovery work end-to-end. The configured amount is not a
+          verified market price. Scheduled scans and report exports are not implemented.
         </Notice>
 
         {/* ------------------------------- comparison ------------------------------- */}
@@ -174,8 +166,8 @@ export function LicensingView(): React.JSX.Element {
                 { label: 'Duplicate groups', free: formatCount(entitlement.duplicateGroupLimit), pro: 'Unlimited' },
                 { label: 'Byte-for-byte verification', free: '—', pro: 'Yes' },
                 { label: 'Saved scan history', free: 'Session', pro: 'Full + comparison' },
-                { label: 'Scheduled scans', free: '—', pro: 'Yes' },
-                { label: 'Exportable reports', free: '—', pro: 'CSV / JSON / HTML' },
+                { label: 'Scheduled scans', free: '—', pro: 'Not implemented' },
+                { label: 'Exportable reports', free: '—', pro: 'Not implemented' },
                 { label: 'Custom cleanup rules', free: '—', pro: 'Yes' },
               ].map((row) => (
                 <tr key={row.label} className="border-b border-line/60">
@@ -287,9 +279,8 @@ function PlanCard({
         size="sm"
         className="mt-2 w-full justify-center"
         variant={active ? 'secondary' : 'primary'}
-        disabled={active}
+        disabled
       >
-        <CreditCard aria-hidden className="size-3" />
         {cta}
       </Button>
     </Panel>

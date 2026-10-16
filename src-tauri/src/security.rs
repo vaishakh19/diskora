@@ -17,7 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::cleanup::execute::{execute_plan, preview_plan, CleanupPlan, CleanupPlanItem, ValidationContext};
+use crate::cleanup::execute::{
+    execute_plan, preview_plan, CleanupPlan, CleanupPlanItem, ValidationContext,
+};
 use crate::cleanup::rules::build_findings;
 use crate::filesystem::long_path::{normalize_long_path, to_unc_long_path};
 use crate::scanner::aggregate::ScanIndex;
@@ -65,6 +67,8 @@ fn a_path_outside_the_approved_roots_is_refused() {
             action: "permanent".to_string(),
         }],
         dry_run: false,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -73,7 +77,10 @@ fn a_path_outside_the_approved_roots_is_refused() {
     };
     let result = execute_plan(&plan, &titles, &context);
     assert_eq!(result.total_removed_count, 0);
-    assert!(victim.exists(), "a file outside the approved roots must survive");
+    assert!(
+        victim.exists(),
+        "a file outside the approved roots must survive"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -92,6 +99,8 @@ fn an_empty_approved_root_list_refuses_everything() {
             action: "permanent".to_string(),
         }],
         dry_run: false,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -126,11 +135,13 @@ fn traversal_style_paths_are_not_actionable() {
                 action: "permanent".to_string(),
             }],
             dry_run: false,
+            confirmation_token: None,
+            confirmed: false,
         };
         let context = ValidationContext {
             index: &index,
             blocked_paths: &[],
-            approved_roots: &[approved.clone()],
+            approved_roots: std::slice::from_ref(&approved),
         };
         let result = execute_plan(&plan, &titles, &context);
         // Either the path does not exist (skipped) or it is outside the root (refused).
@@ -143,7 +154,10 @@ fn traversal_style_paths_are_not_actionable() {
 fn the_frontend_rejects_traversal_shaped_arguments() {
     // The webview sends whatever it likes; the command layer must refuse nonsense.
     for bad in ["", "   ", "..", "..\\..\\Windows", "C:\\ok\0bad"] {
-        assert!(!bad.contains(':') || bad.contains('\0') || bad.trim().is_empty(), "{bad}");
+        assert!(
+            !bad.contains(':') || bad.contains('\0') || bad.trim().is_empty(),
+            "{bad}"
+        );
     }
 }
 
@@ -176,6 +190,8 @@ fn a_link_is_never_deleted_through() {
             action: "permanent".to_string(),
         }],
         dry_run: false,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -183,7 +199,10 @@ fn a_link_is_never_deleted_through() {
         approved_roots: &[approved.to_string_lossy().to_string()],
     };
     let result = execute_plan(&plan, &titles, &context);
-    assert_eq!(result.total_removed_count, 0, "a link is never deleted through");
+    assert_eq!(
+        result.total_removed_count, 0,
+        "a link is never deleted through"
+    );
     assert!(target.exists(), "the link target must survive");
     let _ = fs::remove_dir_all(&root);
 }
@@ -227,6 +246,8 @@ fn a_file_modified_after_the_scan_is_skipped() {
             action: "permanent".to_string(),
         }],
         dry_run: false,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -235,7 +256,9 @@ fn a_file_modified_after_the_scan_is_skipped() {
     };
     let result = execute_plan(&plan, &titles, &context);
     assert_eq!(result.total_removed_count, 0);
-    assert!(result.items[0].results[0].detail.contains("changed since the scan"));
+    assert!(result.items[0].results[0]
+        .detail
+        .contains("changed since the scan"));
     assert!(victim.exists());
     let _ = fs::remove_dir_all(&root);
 }
@@ -256,6 +279,8 @@ fn selecting_a_file_never_deletes_it() {
         scan_id: None,
         items: Vec::new(),
         dry_run: false,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -284,6 +309,8 @@ fn a_dry_run_is_always_non_destructive() {
             action: "recycle".to_string(),
         }],
         dry_run: true,
+        confirmation_token: None,
+        confirmed: false,
     };
     let context = ValidationContext {
         index: &index,
@@ -337,8 +364,13 @@ fn at_least_one_duplicate_copy_is_always_preserved() {
     };
     // Two copies vanish (already removed elsewhere).
     group.copies.retain(|copy| copy.path == "C:\\a.bin");
-    group.reclaimable_bytes = group.size_bytes.saturating_mul(group.copies.len().saturating_sub(1) as u64);
-    assert_eq!(group.reclaimable_bytes, 0, "with one copy left there is nothing to reclaim");
+    group.reclaimable_bytes = group
+        .size_bytes
+        .saturating_mul(group.copies.len().saturating_sub(1) as u64);
+    assert_eq!(
+        group.reclaimable_bytes, 0,
+        "with one copy left there is nothing to reclaim"
+    );
     assert_eq!(group.copies.len(), 1);
 }
 
@@ -356,7 +388,9 @@ fn long_path_normalisation_round_trips() {
 fn unc_paths_are_prefixed_correctly() {
     let unc = Path::new("\\\\server\\share\\folder");
     let long = to_unc_long_path(unc);
-    assert!(long.to_string_lossy().starts_with("\\\\?\\UNC\\server\\share"));
+    assert!(long
+        .to_string_lossy()
+        .starts_with("\\\\?\\UNC\\server\\share"));
     assert_eq!(normalize_long_path(&long), unc);
 }
 
@@ -372,43 +406,58 @@ fn normalisation_is_idempotent() {
 
 #[test]
 fn no_command_in_the_backend_spawns_a_scanned_file() {
-    // The only process Diskwise ever starts is explorer.exe, with a fixed argument shape.
-    // There is no API anywhere in the command surface that takes a command line.
-    let source = include_str!("commands/files.rs");
-    assert!(source.contains("explorer.exe"));
-    assert!(!source.contains("Command::new(path"));
-    assert!(!source.contains("cmd.exe"));
-    assert!(!source.contains("powershell"));
+    // The command validates ordinary folders before delegating to a fixed Explorer executable;
+    // never use ShellExecuteW with an arbitrary scanned path (it could launch an .exe or script).
+    let commands = include_str!("commands/files.rs");
+    let platform = include_str!("platform/win32.rs");
+    assert!(commands.contains("validate_open_folder(&candidate)?"));
+    assert!(commands.contains("platform::open_folder_in_explorer(&candidate)"));
+    assert!(platform.contains("GetWindowsDirectoryW"));
+    assert!(platform.contains("Command::new(explorer_executable()?)"));
+    assert!(!platform.contains("ShellExecuteW"));
+    for source in [commands, platform] {
+        assert!(!source.contains("Command::new(path"));
+        assert!(!source.contains("cmd.exe"));
+        assert!(!source.contains("powershell"));
+    }
 }
 
 #[test]
 fn the_webview_has_no_shell_permission() {
-        // The capability file is the contract: assert the essentials are granted and the dangerous
-        // ones are not. The check runs against the `permissions` array only, so prose in the
-        // description can neither satisfy nor break it.
-        let capability = include_str!("../capabilities/default.json");
-        let start = capability
-            .find("\"permissions\"")
-            .expect("the capability file must declare permissions");
-        let permissions = &capability[start..];
+    // The capability file is the contract: assert the essentials are granted and the dangerous
+    // ones are not. The check runs against the `permissions` array only, so prose in the
+    // description can neither satisfy nor break it.
+    let capability = include_str!("../capabilities/default.json");
+    let start = capability
+        .find("\"permissions\"")
+        .expect("the capability file must declare permissions");
+    let permissions = &capability[start..];
 
-        for required in [
-            "\"core:default\"",
-            "\"core:window:allow-minimize\"",
-            "\"core:window:allow-close\"",
-            "\"core:event:default\"",
-            "\"dialog:allow-open\"",
-            "\"opener:allow-open-path\"",
-        ] {
-            assert!(permissions.contains(required), "must grant {required}");
-        }
+    for required in [
+        "\"core:default\"",
+        "\"core:window:allow-minimize\"",
+        "\"core:window:allow-close\"",
+        "\"core:event:default\"",
+        "\"dialog:allow-open\"",
+    ] {
+        assert!(permissions.contains(required), "must grant {required}");
+    }
 
-        for forbidden in ["shell", "fs:", "allow-execute", "process:", "http:"] {
-            assert!(
-                !permissions.contains(forbidden),
-                "must not grant anything matching {forbidden}"
-            );
-        }
+    for forbidden in [
+        "shell",
+        "fs:",
+        "allow-execute",
+        "process:",
+        "http:",
+        "opener:",
+    ] {
+        assert!(
+            !permissions.contains(forbidden),
+            "must not grant anything matching {forbidden}"
+        );
+    }
+    // The plugin itself must not be registered: opening a path bypasses open_path's folder guard.
+    assert!(!include_str!("lib.rs").contains("tauri_plugin_opener::init"));
 }
 
 /* ------------------------------ protected data ------------------------------ */
@@ -428,7 +477,10 @@ fn a_protected_category_can_only_ever_be_informational() {
         ..Default::default()
     };
     let findings = build_findings(&index, &[rule], 0);
-    let finding = findings.iter().find(|finding| finding.id == "rule-r").unwrap();
+    let finding = findings
+        .iter()
+        .find(|finding| finding.id == "rule-r")
+        .unwrap();
     assert_eq!(finding.risk, "informational");
     assert!(finding.protected);
     let _ = fs::remove_dir_all(&root);

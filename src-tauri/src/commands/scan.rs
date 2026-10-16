@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 use crate::error::{AppError, AppResult};
-use crate::scanner::aggregate::{prune_tree, ScanIndex, TreeNode, PruneOptions};
+use crate::scanner::aggregate::{prune_tree, PruneOptions, ScanIndex, TreeNode};
 use crate::scanner::walker::{self, ScanOptions};
 use crate::state::{entry_from_run, AppState, ScanEntry};
 use crate::storage::db::ScanHistoryRow;
@@ -33,7 +33,14 @@ pub async fn scan_start(
 
     let root = options.root_path.trim().to_string();
     if root.is_empty() {
-        return Err(AppError::InvalidArgument("No scan root was provided.".to_string()));
+        return Err(AppError::InvalidArgument(
+            "No scan root was provided.".to_string(),
+        ));
+    }
+    if options.follow_links {
+        return Err(AppError::InvalidArgument(
+            "Following links and junctions is not supported safely in this build.".to_string(),
+        ));
     }
 
     let settings = state
@@ -56,11 +63,7 @@ pub async fn scan_start(
         return Err(AppError::NotFound(root.clone()));
     }
 
-    let scan_id = format!(
-        "scan-{}-{}",
-        crate::licensing::verify::now_millis(),
-        std::process::id()
-    );
+    let scan_id = format!("scan-{}", uuid::Uuid::new_v4());
 
     // Expected total, from volume metadata, drives the ETA and percentage. Only meaningful when
     // scanning a whole volume; scanning a single folder has no honest expectation.
@@ -119,7 +122,7 @@ pub async fn scan_start(
                     &emitter_id,
                     &emitter_counters,
                     started.elapsed().as_millis() as u64,
-                    None,
+                    expected_bytes,
                 );
                 let _ = emitter_app.emit(SCAN_PROGRESS_EVENT, &payload);
                 if matches!(
@@ -149,10 +152,14 @@ pub async fn scan_start(
 
         // Apply the pruning budget so the tree the UI receives is bounded.
         if let Some(index) = &entry.index {
-            let pruned = prune_tree(index, 0, PruneOptions {
-                max_children: walk_options.max_children_per_node as usize,
-                max_nodes: PruneOptions::default().max_nodes,
-            });
+            let pruned = prune_tree(
+                index,
+                0,
+                PruneOptions {
+                    max_children: walk_options.max_children_per_node as usize,
+                    max_nodes: PruneOptions::default().max_nodes,
+                },
+            );
             entry.pruned_nodes = pruned.pruned_nodes;
         }
 
@@ -168,9 +175,21 @@ pub async fn scan_start(
                     finished_at: entry.finished_at,
                     duration_ms: entry.duration_ms,
                     status: entry.status.clone(),
-                    total_bytes: entry.index.as_ref().map(|index| index.total_bytes() as i64).unwrap_or(0),
-                    file_count: entry.index.as_ref().map(|index| index.total_files() as i64).unwrap_or(0),
-                    folder_count: entry.index.as_ref().map(|index| index.total_folders() as i64).unwrap_or(0),
+                    total_bytes: entry
+                        .index
+                        .as_ref()
+                        .map(|index| index.total_bytes() as i64)
+                        .unwrap_or(0),
+                    file_count: entry
+                        .index
+                        .as_ref()
+                        .map(|index| index.total_files() as i64)
+                        .unwrap_or(0),
+                    folder_count: entry
+                        .index
+                        .as_ref()
+                        .map(|index| index.total_folders() as i64)
+                        .unwrap_or(0),
                     error_count: entry.errors.len() as i64,
                     truncated: entry.hit_limit,
                     drive_id,
@@ -179,6 +198,7 @@ pub async fn scan_start(
             }
         }
 
+        let terminal_status = entry.status.clone();
         if let Ok(mut registry) = state.scans() {
             registry.insert(walk_id.clone(), Arc::new(entry));
         }
@@ -188,10 +208,10 @@ pub async fn scan_start(
         if let Ok(mut registry) = state.cancelled.lock() {
             registry.remove(&walk_id);
         }
-        walk_counters.set_phase(if walk_counters.is_cancelled() {
-            crate::scanner::progress::ScanPhase::Cancelled
-        } else {
-            crate::scanner::progress::ScanPhase::Done
+        walk_counters.set_phase(match terminal_status.as_str() {
+            "cancelled" => crate::scanner::progress::ScanPhase::Cancelled,
+            "error" => crate::scanner::progress::ScanPhase::Error,
+            _ => crate::scanner::progress::ScanPhase::Done,
         });
 
         // Publish one final reading, then stop the emitter.
@@ -229,6 +249,8 @@ fn volume_used_bytes(path: &std::path::Path) -> Option<u64> {
 /// Cancels a running scan. The walk stops within one directory read.
 #[tauri::command]
 pub async fn scan_cancel(scan_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    // A completed scan is immutable: cancellation only targets a currently running registry
+    // entry. The worker writes the final cancelled status once the walk actually stops.
     if let Ok(registry) = state.counters.lock() {
         if let Some(counters) = registry.get(&scan_id) {
             counters.cancel();
@@ -237,14 +259,6 @@ pub async fn scan_cancel(scan_id: String, state: State<'_, AppState>) -> AppResu
     if let Ok(registry) = state.cancelled.lock() {
         if let Some(flag) = registry.get(&scan_id) {
             flag.store(true, Ordering::SeqCst);
-        }
-    }
-    if let Ok(mut scans) = state.scans() {
-        if let Some(entry) = scans.get(&scan_id) {
-            let mut updated = (**entry).clone();
-            updated.status = "cancelled".to_string();
-            updated.finished_at = Some(crate::licensing::verify::now_millis());
-            scans.insert(scan_id, Arc::new(updated));
         }
     }
     Ok(())
@@ -268,7 +282,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
     // Scan *history* is a paid capability; this list is the in-memory one and stays free.
     let mut summaries: Vec<ScanSummary> = {
         let scans = state.scans()?;
-        let mut collected: Vec<ScanSummary> = scans
+        let collected: Vec<ScanSummary> = scans
             .values()
             .map(|entry| ScanSummary {
                 scan_id: entry.scan_id.clone(),
@@ -278,9 +292,21 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
                 finished_at: entry.finished_at,
                 duration_ms: entry.duration_ms,
                 status: entry.status.clone(),
-                total_bytes: entry.index.as_ref().map(|index| index.total_bytes()).unwrap_or(0),
-                file_count: entry.index.as_ref().map(|index| index.total_files()).unwrap_or(0),
-                folder_count: entry.index.as_ref().map(|index| index.total_folders()).unwrap_or(0),
+                total_bytes: entry
+                    .index
+                    .as_ref()
+                    .map(|index| index.total_bytes())
+                    .unwrap_or(0),
+                file_count: entry
+                    .index
+                    .as_ref()
+                    .map(|index| index.total_files())
+                    .unwrap_or(0),
+                folder_count: entry
+                    .index
+                    .as_ref()
+                    .map(|index| index.total_folders())
+                    .unwrap_or(0),
                 error_count: entry.errors.len(),
                 truncated: entry.hit_limit,
                 drive_id: walker::drive_id_for(&std::path::PathBuf::from(&entry.root_path)),
@@ -289,7 +315,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
             .collect();
         collected
     };
-    summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
 
     // Merge in persisted history so the list survives a restart.
     if let Ok(guard) = state.database() {
@@ -318,7 +344,7 @@ pub fn scan_list(state: State<'_, AppState>) -> AppResult<Vec<ScanSummary>> {
                         persisted: row.persisted,
                     });
                 }
-                summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
             }
         }
     }
@@ -364,7 +390,11 @@ pub fn scan_children(
     for file in index.files_of(position) {
         items.push(file_node(file));
     }
-    items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| a.path.cmp(&b.path)));
+    items.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| a.path.cmp(&b.path))
+    });
 
     let total = items.len();
     let limit = limit.clamp(1, 1000);
@@ -481,7 +511,9 @@ fn build_result(entry: &ScanEntry) -> ScanResult {
             pruned.tree
         }
         None => TreeNode {
-            id: crate::scanner::aggregate::stable_path_id(&std::path::PathBuf::from(&entry.root_path)),
+            id: crate::scanner::aggregate::stable_path_id(&std::path::PathBuf::from(
+                &entry.root_path,
+            )),
             path: entry.root_path.clone(),
             name: entry.root_name.clone(),
             kind: "folder".to_string(),
@@ -522,8 +554,6 @@ fn build_result(entry: &ScanEntry) -> ScanResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn a_child_page_clamps_its_limit() {
         // Guards against a caller asking for a million rows.

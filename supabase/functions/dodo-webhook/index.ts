@@ -1,25 +1,15 @@
 // POST /functions/v1/dodo-webhook
 //
-// The only place a Diskwise entitlement is granted.
+// Signed Dodo webhook intake. LIVE CHECKOUT AND ENTITLEMENT ISSUANCE ARE DISABLED.
 //
-// ## Trust model
+// A legacy version generated an opaque key, stored only its hash, never delivered it and did not
+// sign the payload the desktop app accepts. Until fulfilment and provider reconciliation exist, we
+// cannot take live payments or acknowledge live successes. Test-mode events can be recorded, and
+// revocations for any already-existing licences must still be attempted.
 //
-// Nothing the browser does is proof of payment. This endpoint accepts a delivery only when the
-// Standard Webhooks signature verifies against the configured secret. A forged body, a replayed
-// body with an old timestamp, and a body with a missing signature are all refused with a 4xx and
-// grant nothing.
-//
-// ## Idempotency
-//
-// Dodo retries until it gets a 2xx. Every delivery is claimed by its `webhook-id` before any work
-// happens, so the second delivery of the same event is acknowledged as already-processed and does
-// nothing. A delivery that reuses an id with a *different* body is refused, not silently ignored.
-//
-// ## Ordering
-//
-// Acknowledge first, process second. Dodo's timeout is shorter than the work, and a timeout causes a
-// retry which this function would then have to deduplicate again. Processing happens in a background
-// task so the 2xx goes out immediately.
+// Nothing from the browser is proof of payment. Verify the Standard Webhooks signature over the
+// raw body, then claim the id/body atomically. Only respond 2xx after processing *and* recording a
+// completed claim. A failure, in-flight claim, or changed body must not be acknowledged as done.
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { fail, json, log, preflight, requestId } from '../_shared/cors.ts';
@@ -34,38 +24,14 @@ import {
   type DodoWebhookPayload,
 } from '../_shared/dodo.ts';
 
-/**
- * A licence key: 160 bits of randomness, grouped for readability when a customer copies it out of
- * an email.
- *
- * Only its SHA-256 hash is stored. The key itself is shown once, at issuance, and is recoverable
- * only through the documented recovery flow.
- */
-function generateLicenceKey(): { key: string; prefix: string } {
-  const bytes = crypto.getRandomValues(new Uint8Array(20));
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; // Crockford, no ambiguous characters.
-  let body = '';
-  for (const byte of bytes) {
-    body += alphabet[byte % 32];
-  }
-  const grouped = (body.match(/.{1,5}/g) ?? []).join('-');
-  return { key: grouped, prefix: grouped.slice(0, 5) };
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
 /** The environment a payment was taken in, from the metadata the checkout function wrote. */
-function environmentOf(payload: DodoWebhookPayload): 'test' | 'live' {
+function environmentOf(payload: DodoWebhookPayload): 'test' | 'live' | 'unknown' {
   const raw = payload.data?.metadata;
   if (raw && typeof raw === 'object') {
     const value = (raw as Record<string, unknown>).environment;
     if (value === 'live' || value === 'test') return value;
   }
-  return 'test';
+  return 'unknown';
 }
 
 Deno.serve(async (request) => {
@@ -104,39 +70,69 @@ Deno.serve(async (request) => {
 
   const webhookId = request.headers.get('webhook-id') ?? '';
   const eventType = typeof payload.type === 'string' ? payload.type : 'unknown';
+
+  // An earlier deployment may already have taken a live payment. Do not claim/acknowledge it or
+  // mint an unusable, undeliverable key: leave the delivery retriable and alert operations. This
+  // guard must be removed only together with signed-key delivery, provider payment validation and
+  // an end-to-end live fulfilment test. Test-mode events and revocations continue to be handled.
+  if (eventType === 'payment.succeeded' &&
+      ((Deno.env.get('DODO_ENVIRONMENT') ?? 'test') !== 'test' || environmentOf(payload) !== 'test')) {
+    log('webhook.live-fulfilment-disabled', { requestId: id, webhookId });
+    return fail(origin, 503, 'Unavailable.', id);
+  }
+
   const hash = await bodyHash(rawBody);
 
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // Claim the id. A conflict means this exact delivery has been seen before: acknowledge and stop.
-  // Dodo treats any 2xx as success, so a duplicate is handled exactly like a fresh one.
-  const { data: claimed, error: claimError } = await supabase.rpc('claim_webhook', {
+  const claimToken = crypto.randomUUID();
+  const { data: claim, error: claimError } = await supabase.rpc('claim_webhook_v2', {
     id: webhookId,
     event_type: eventType,
     body_hash: hash,
     now_ms: Date.now(),
+    claim_token: claimToken,
   });
   if (claimError) {
     log('webhook.claim-failed', { requestId: id, webhookId });
-    return fail(origin, 500, 'Unavailable.', id);
+    return fail(origin, 503, 'Unavailable.', id);
   }
-  if (claimed === false) {
-    log('webhook.duplicate', { requestId: id, webhookId, eventType });
+  if (claim === 'mismatch') {
+    log('webhook.id-body-mismatch', { requestId: id, webhookId });
+    return fail(origin, 409, 'Conflict.', id);
+  }
+  if (claim === 'in-flight') return fail(origin, 503, 'Unavailable.', id);
+  if (claim === 'processed') {
     return json({ received: true, duplicate: true }, { origin, status: 200 });
   }
+  if (claim !== 'claimed') return fail(origin, 503, 'Unavailable.', id);
 
-  // Acknowledge before processing. Dodo's retry window is generous, but a slow handler still causes
-  // avoidable retries, and every retry is another row in `webhook_events`.
-  const background = processEvent(supabase, webhookId, eventType as DodoEventType, payload, id);
-  // @ts-ignore — Deno's `waitUntil` keeps the isolate alive past the response.
-  void (globalThis as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil?.(
-    background,
-  );
-  void background;
-
-  return json({ received: true }, { origin, status: 200 });
+  try {
+    await processEvent(supabase, webhookId, eventType as DodoEventType, payload, id);
+    const { data: finished, error: finishError } = await supabase.rpc('finish_webhook_v2', {
+      id: webhookId,
+      claim_token: claimToken,
+      error: null,
+      now_ms: Date.now(),
+    });
+    if (finishError || finished !== true) throw new Error('webhook-finish-failed');
+    return json({ received: true }, { origin, status: 200 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown';
+    log('webhook.processing-failed', { requestId: id, webhookId, eventType, reason: message });
+    const { error: recordError } = await supabase.rpc('finish_webhook_v2', {
+      id: webhookId,
+      claim_token: claimToken,
+      error: message,
+      now_ms: Date.now(),
+    });
+    if (recordError) log('webhook.failure-record-failed', { requestId: id, webhookId });
+    // Never tell Dodo the event is complete if any part of the work/finish failed. The next retry
+    // reclaims failed work immediately, or a crashed worker's lease after five minutes.
+    return fail(origin, 503, 'Unavailable.', id);
+  }
 });
 
 async function processEvent(
@@ -146,30 +142,17 @@ async function processEvent(
   payload: DodoWebhookPayload,
   requestId: string,
 ): Promise<void> {
-  const now = Date.now();
-  try {
-    if ((GRANTING_EVENTS as readonly string[]).includes(eventType)) {
-      await grant(supabase, payload, requestId);
-    } else if ((REVOKING_EVENTS as readonly string[]).includes(eventType)) {
-      await revoke(supabase, payload, eventType, requestId);
-    } else {
-      // Recorded, acknowledged, and deliberately ignored. `payment.failed`,
-      // `payment.processing`, `payment.cancelled`, `refund.failed`, `dispute.opened` and the
-      // remaining dispute states change nothing about entitlement.
-      log('webhook.ignored', { requestId, webhookId, eventType });
-    }
-    await supabase.rpc('finish_webhook', { id: webhookId, error: null, now_ms: Date.now() });
-  } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown';
-    log('webhook.processing-failed', { requestId, webhookId, eventType, reason: message });
-    // The failure is recorded against the claimed id. A retry of the same id will be treated as a
-    // duplicate and will *not* retry the work, which is correct: the failure is a bug to fix, not a
-    // delivery to replay. Manual reprocessing is a documented support operation.
-    await supabase.rpc('finish_webhook', { id: webhookId, error: message, now_ms: Date.now() });
+  if ((GRANTING_EVENTS as readonly string[]).includes(eventType)) {
+    await grant(supabase, payload, requestId);
+  } else if ((REVOKING_EVENTS as readonly string[]).includes(eventType)) {
+    await revoke(supabase, payload, eventType, webhookId, requestId);
+  } else {
+    // Failed, processing, or cancelled payments and pending disputes never grant entitlement.
+    log('webhook.ignored', { requestId, webhookId, eventType });
   }
 }
 
-/* --------------------------------------------------------------- granting -- */
+/* --------------------------------------------------------------- test grant -- */
 
 async function grant(
   supabase: ReturnType<typeof createClient>,
@@ -177,117 +160,21 @@ async function grant(
   requestId: string,
 ): Promise<void> {
   const payment = parsePayment(payload);
-  if (!payment) {
-    log('webhook.grant.malformed', { requestId });
-    return;
-  }
+  if (!payment) throw new Error('malformed-payment');
 
-  const environment = environmentOf(payload);
+  // Live checkout is disabled until an accepted payment can produce, deliver, and later recover a
+  // correctly signed licence. Merely storing the hash of an opaque, never-delivered key is *not*
+  // fulfilment. Keep test-mode orders for audit, but never create a licence from them.
+  if (environmentOf(payload) !== 'test' || (Deno.env.get('DODO_ENVIRONMENT') ?? 'test') !== 'test') {
+    throw new Error('live-fulfilment-disabled');
+  }
   const metadata = (payload.data?.metadata ?? {}) as Record<string, unknown>;
   const tierId = typeof metadata.tier_id === 'string' ? metadata.tier_id : '';
   const productId = typeof metadata.product_id === 'string' ? metadata.product_id : '';
+  if (!tierId || !productId) throw new Error('missing-checkout-metadata');
 
-  if (!tierId || !productId) {
-    log('webhook.grant.no-tier', { requestId, paymentId: payment.payment_id });
-    return;
-  }
-
-  // A test-mode payment is recorded but never granted. This is the belt to the compile-time
-  // environment default's braces: even if a live deployment is pointed at the sandbox, a sandbox
-  // payment cannot produce a real entitlement.
-  if (environment !== 'live') {
-    await upsertOrder(supabase, payment, tierId, productId, 'succeeded', 'test');
-    log('webhook.grant.test-mode', { requestId, paymentId: payment.payment_id, environment });
-    return;
-  }
-
-  const { data: tier } = await supabase
-    .from('entitlement_configs')
-    .select('id, product_id, device_limit, offline_lease_days, permanent, update_eligibility_months')
-    .eq('id', tierId)
-    .eq('active', true)
-    .maybeSingle<{
-      id: string;
-      product_id: string;
-      device_limit: number;
-      offline_lease_days: number;
-      permanent: boolean;
-      update_eligibility_months: number | null;
-    }>();
-
-  if (!tier) {
-    log('webhook.grant.unknown-tier', { requestId, tierId });
-    return;
-  }
-
-  const order = await upsertOrder(supabase, payment, tierId, productId, 'succeeded', 'live');
-
-  // Exactly one licence per order, enforced by a unique index. A replayed `payment.succeeded` with
-  // a different webhook id but the same payment id hits the unique constraint on
-  // `orders.provider_payment_id` first and is a no-op.
-  const { data: existing } = await supabase
-    .from('licences')
-    .select('id')
-    .eq('order_id', order.id)
-    .maybeSingle<{ id: string }>();
-  if (existing) {
-    log('webhook.grant.already-issued', { requestId, orderId: order.id });
-    return;
-  }
-
-  // The key is generated here and never stored in plaintext. Its hash is what the desktop app's
-  // activation path looks up.
-  const generated = generateLicenceKey();
-  const keyHash = await sha256Hex(generated.key);
-
-  const signingKeyId = Deno.env.get('LICENCE_SIGNING_KEY_ID') ?? 'k2026-01';
-  const schemaVersion = Number(Deno.env.get('LICENCE_SCHEMA_VERSION') ?? '1');
-  const updateUntil =
-    tier.update_eligibility_months === null
-      ? null
-      : Date.now() + tier.update_eligibility_months * 30 * 24 * 60 * 60 * 1000;
-
-  const { data: licence, error: licenceError } = await supabase
-    .from('licences')
-    .insert({
-      order_id: order.id,
-      product_id: tier.product_id,
-      tier_id: tier.id,
-      key_prefix: generated.prefix,
-      key_hash: keyHash,
-      signing_key_id: signingKeyId,
-      schema_version: Number.isFinite(schemaVersion) ? schemaVersion : 1,
-      permanent: tier.permanent,
-      lease_days: tier.offline_lease_days,
-      device_limit: tier.device_limit,
-      update_until: updateUntil,
-      issued_at: Date.now(),
-      status: 'active',
-      created_at: Date.now(),
-      updated_at: Date.now(),
-    })
-    .select('id')
-    .single<{ id: string }>();
-
-  if (licenceError) {
-    // The unique index on `licences.order_id` is what makes this safe to retry: a duplicate
-    // `payment.succeeded` for the same order cannot create a second licence.
-    log('webhook.grant.insert-failed', { requestId, orderId: order.id });
-    throw new Error('licence-insert-failed');
-  }
-
-  await supabase.from('audit_log').insert({
-    at_ms: Date.now(),
-    actor: 'dodo-webhook',
-    action: 'licence.issued',
-    licence_id: licence.id,
-    order_id: order.id,
-    detail: `Licence issued for tier ${tier.id}.`,
-  });
-
-  // The key is delivered out of band (see `docs/licensing.md`). It is deliberately not returned in
-  // the webhook response, which Dodo does not need, and not written to the log.
-  log('webhook.grant.issued', { requestId, orderId: order.id, licenceId: licence.id, tierId: tier.id });
+  const order = await upsertOrder(supabase, payment, tierId, productId, 'succeeded', 'test');
+  log('webhook.test-payment-recorded', { requestId, orderId: order.id });
 }
 
 /* -------------------------------------------------------------- revoking -- */
@@ -296,53 +183,62 @@ async function revoke(
   supabase: ReturnType<typeof createClient>,
   payload: DodoWebhookPayload,
   eventType: DodoEventType,
+  webhookId: string,
   requestId: string,
 ): Promise<void> {
   const payment = parsePayment(payload);
-  if (!payment) {
-    log('webhook.revoke.malformed', { requestId });
-    return;
-  }
+  if (!payment) throw new Error('malformed-revocation');
 
-  const { data: order } = await supabase
+  const { data: order, error: lookupError } = await supabase
     .from('orders')
     .select('id, status, environment')
     .eq('provider_payment_id', payment.payment_id)
     .maybeSingle<{ id: string; status: string; environment: string }>();
 
-  if (!order) {
-    // A refund for a payment this deployment never recorded is either a test-mode payment or an
-    // order from a different environment. Nothing to revoke.
-    log('webhook.revoke.unknown-order', { requestId, paymentId: payment.payment_id });
-    return;
-  }
+  // A revocation arriving before its payment, an unexpected provider shape, or a database outage
+  // must NOT get a 2xx. Retrying gives the earlier event a chance to finish; persistent failures
+  // remain visible for manual reconciliation instead of silently granting refunded customers.
+  if (lookupError) throw new Error('revocation-order-lookup-failed');
+  if (!order) throw new Error('revocation-order-not-found');
 
   const source = eventType.startsWith('refund') ? 'refund' : eventType.startsWith('dispute') ? 'dispute' : 'admin';
 
   if (source === 'refund') {
-    await supabase.from('refunds').upsert(
+    // Do not invent a provider refund id or equate a full payment to a partial refund. Until a
+    // signed Dodo refund payload is validated against its documented shape, this path stays
+    // retriable rather than recording fabricated money or silently revoking on ambiguous data.
+    const refundId = payload.data?.refund_id;
+    const refundAmount = payload.data?.amount;
+    if (typeof refundId !== 'string' || !refundId) throw new Error('refund-id-missing');
+    if (typeof refundAmount !== 'number' || !Number.isSafeInteger(refundAmount) ||
+        refundAmount <= 0 || refundAmount > payment.total_amount) {
+      throw new Error('refund-amount-unverified');
+    }
+    const { error: refundError } = await supabase.from('refunds').upsert(
       {
         order_id: order.id,
-        provider_refund_id: `${payment.payment_id}:${eventType}`,
-        amount_minor_units: payment.total_amount,
+        provider_refund_id: refundId,
+        amount_minor_units: refundAmount,
         currency: payment.currency,
         status: 'succeeded',
         created_at: Date.now(),
       },
       { onConflict: 'provider_refund_id' },
     );
-    await supabase.from('orders').update({ status: 'refunded', updated_at: Date.now() }).eq('id', order.id);
+    if (refundError) throw new Error('refund-write-failed');
+    const { error: orderError } = await supabase
+      .from('orders').update({ status: 'refunded', updated_at: Date.now() }).eq('id', order.id);
+    if (orderError) throw new Error('refund-order-update-failed');
   }
 
-  const { data: licences } = await supabase
+  const { data: licences, error: licencesError } = await supabase
     .from('licences')
     .select('id')
     .eq('order_id', order.id);
-
+  if (licencesError) throw new Error('revocation-licence-lookup-failed');
   const licenceIds = (licences ?? []).map((row: { id: string }) => row.id);
 
-  // `neq('status', 'refunded')` makes this idempotent: a replayed refund event changes nothing.
-  await supabase
+  const { error: updateError } = await supabase
     .from('licences')
     .update({
       status: 'refunded',
@@ -352,25 +248,29 @@ async function revoke(
     })
     .eq('order_id', order.id)
     .neq('status', 'refunded');
+  if (updateError) throw new Error('revocation-update-failed');
 
-  // One revocation row per licence, so the reason survives even if the licence is later re-issued.
+  // Retries after a partial write must not create another revocation for the same delivery.
   for (const licenceId of licenceIds) {
-    await supabase.from('revocations').insert({
+    const { error: revocationError } = await supabase.from('revocations').upsert({
       licence_id: licenceId,
+      webhook_id: webhookId,
       reason: source,
       source,
       actor: 'dodo-webhook',
       created_at: Date.now(),
-    });
+    }, { onConflict: 'licence_id,webhook_id' });
+    if (revocationError) throw new Error('revocation-write-failed');
   }
 
-  await supabase.from('audit_log').insert({
+  const { error: auditError } = await supabase.from('audit_log').insert({
     at_ms: Date.now(),
     actor: 'dodo-webhook',
     action: `licence.${source}`,
     order_id: order.id,
     detail: `Licence revoked after ${source}.`,
   });
+  if (auditError) throw new Error('revocation-audit-failed');
 
   log('webhook.revoke.done', { requestId, orderId: order.id, source });
 }
@@ -392,6 +292,17 @@ async function upsertOrder(
   storedEnvironment: 'test' | 'live',
 ): Promise<{ id: string }> {
   const now = Date.now();
+  const { data: previous, error: previousError } = await supabase
+    .from('orders')
+    .select('id, status, environment')
+    .eq('provider_payment_id', payment.payment_id)
+    .maybeSingle<{ id: string; status: string; environment: string }>();
+  if (previousError) throw new Error('order-lookup-failed');
+  if (previous && previous.environment !== storedEnvironment) {
+    throw new Error('order-environment-mismatch');
+  }
+  if (previous?.status === 'refunded') return { id: previous.id };
+
   const { data, error } = await supabase
     .from('orders')
     .upsert(

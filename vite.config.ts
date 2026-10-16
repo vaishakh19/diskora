@@ -35,7 +35,9 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    sourcemap: true,
+    // The packaged release must not ship source maps (or filesystem/source paths). Vite's dev
+    // server still provides source-level debugging; enable release maps only with a reviewed need.
+    sourcemap: false,
     chunkSizeWarningLimit: 1400,
     rollupOptions: {
       output: {

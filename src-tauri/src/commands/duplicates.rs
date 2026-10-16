@@ -191,6 +191,7 @@ fn free_group_limit(authorization: &crate::authz::Authorization) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn verify_rejects_empty_paths() {

@@ -315,6 +315,7 @@ fn mirror_activation(
             deactivated_at: None,
         }),
     }
+    .map_err(AppError::Database)
 }
 
 fn cache_entitlement(state: &AppState, entitlement: &Entitlement) -> AppResult<()> {

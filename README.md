@@ -22,6 +22,22 @@ npm run bench          # tree aggregation benchmark, prints real measurements
 npm run rust:test      # Rust tests (requires the toolchain)
 ```
 
+To scan **real files**, run the native app on Windows 10/11, not the browser preview. After
+installing Node.js, Rustup, Microsoft C++ Build Tools (MSVC), and WebView2 (see
+[Windows prerequisites](docs/installer.md#prerequisites)), run in PowerShell:
+
+```powershell
+rustup default stable  # downloads Rust and selects the default toolchain
+cargo --version         # confirm the toolchain is available
+npm ci
+npm run app:dev         # starts Vite itself and opens the Tauri desktop window
+```
+
+Do not start `npm run dev` separately on the same port. Start with a small disposable folder:
+scanning is read-only, but **native compilation and cleanup are not yet release-verified**. The
+current Windows CI Rust job still fails before tests and installers; see the release audit before
+relying on an actual-disk run.
+
 ---
 
 ## What it does

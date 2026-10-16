@@ -104,7 +104,7 @@ impl ProgressCounters {
             return true;
         }
         self.entries
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 (count < limit).then_some(count + 1)
             })
             .is_ok()

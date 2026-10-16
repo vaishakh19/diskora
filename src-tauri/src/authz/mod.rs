@@ -154,6 +154,7 @@ mod tests {
     use super::*;
     use crate::config::product::{Environment, ProductTier, TrustedKey};
     use crate::licensing::payload::{encode, payload_bytes, LicensePayload};
+    use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
 
     const NOW: i64 = 1_700_000_100_000;

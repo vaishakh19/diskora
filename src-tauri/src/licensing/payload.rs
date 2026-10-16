@@ -581,8 +581,8 @@ mod tests {
 
     #[test]
     fn an_empty_key_is_rejected() {
-        assert_eq!(parse(""), Err(LicenseError::Empty));
-        assert_eq!(parse("   "), Err(LicenseError::Empty));
+        assert!(matches!(parse(""), Err(LicenseError::Empty)));
+        assert!(matches!(parse("   "), Err(LicenseError::Empty)));
     }
 
     #[test]

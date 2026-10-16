@@ -23,7 +23,7 @@
 //! Run with `cargo test --test licence_lifecycle`. It needs no database, no network and no
 //! filesystem outside the fixtures directory.
 
-use diskwise_lib::authz::{authorize, Authorization, Permission};
+use diskwise_lib::authz::{authorize, Authorization};
 use diskwise_lib::config::product::{CommercialConfig, Environment, ProductTier, TrustedKey};
 use diskwise_lib::licensing::payload::{self, DeviceBinding, LicenseError, LicensePayload};
 use diskwise_lib::licensing::verify::{

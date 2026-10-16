@@ -125,7 +125,7 @@ fn generate(scenario: &Scenario, seed: u32) -> ScanRun {
             path: parent_path.join(format!("f{index}.{extension}")),
             name: format!("f{index}.{extension}"),
             size,
-            disk_size: Some((size + 4095) / 4096 * 4096),
+            disk_size: Some(size.div_ceil(4096) * 4096),
             modified_at: Some(1_700_000_000_000),
             extension: Some(extension.to_string()),
             parent_path,
@@ -248,7 +248,7 @@ fn main() {
         let mut pruned = None;
         for _ in 0..runs {
             let started = Instant::now();
-            let tree = prune_tree(&index, root, prune.clone());
+            let tree = prune_tree(&index, root, prune);
             prune_samples.push(started.elapsed().as_secs_f64() * 1000.0);
             pruned = Some(tree);
         }

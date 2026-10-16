@@ -46,11 +46,12 @@ export const DEFAULT_PRUNE_OPTIONS: Required<PruneOptions> = {
 
 export function pruneTree(root: TreeNode, options: PruneOptions = {}): PruneResult {
   const { maxChildren, maxNodes } = { ...DEFAULT_PRUNE_OPTIONS, ...options };
-  const limit = Math.max(2, Math.floor(maxChildren));
+  const budget = Math.max(1, Math.floor(maxNodes));
+  const limit = Math.min(Math.max(2, Math.floor(maxChildren)), Math.max(2, budget - 1));
 
   const depth = treeDepth(root);
   let result = buildLimited(root, limit, depth);
-  if (countNodes(result.tree) <= maxNodes) return result;
+  if (countNodes(result.tree) <= budget) return result;
 
   // The tree is too big, so the depth has to come down.
   //
@@ -60,24 +61,21 @@ export function pruneTree(root: TreeNode, options: PruneOptions = {}): PruneResu
   // tree of 20 000 directories is around 55 deep) meant rebuilding the whole tree once per level.
   // Measured on a 270 000-node tree: 4.2 s linear, ~70 ms binary.
   let low = 1;
-  let high = depth - 1;
+  let high = Math.max(1, depth - 1);
   while (low < high) {
     const middle = Math.floor((low + high + 1) / 2);
     const candidate = buildLimited(root, limit, middle);
-    if (countNodes(candidate.tree) <= maxNodes) {
+    if (countNodes(candidate.tree) <= budget) {
       low = middle;
-      result = candidate;
     } else {
       high = middle - 1;
     }
   }
 
-  // `low` is the deepest level that fits. Rebuild once more at that depth so the returned result is
-  // the best one found, and fall back to the shallowest cut if even that is too big.
+  // Rebuild at the deepest level that fits. If even one layer of children exceeds a tiny budget,
+  // return just the root with its original (honest) aggregate totals.
   result = buildLimited(root, limit, low);
-  if (countNodes(result.tree) > maxNodes && low > 1) {
-    result = buildLimited(root, limit, 1);
-  }
+  if (countNodes(result.tree) > budget) result = buildLimited(root, limit, 0);
   return result;
 }
 

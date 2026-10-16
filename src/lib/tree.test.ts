@@ -66,6 +66,23 @@ describe('pruneTree', () => {
     expect(result.tree.sizeBytes).toBe(tree.sizeBytes);
   });
 
+  it('keeps a wide root within a budget smaller than the child limit', () => {
+    const tree = folder(
+      'C:\\root',
+      Array.from({ length: 30 }, (_, i) => file(`C:\\root\\f-${i}`, 1)),
+    );
+    const result = pruneTree(tree, { maxChildren: 100, maxNodes: 10 });
+    expect(countNodes(result.tree)).toBe(10);
+    expect(result.tree.children.some((child) => child.synthetic)).toBe(true);
+    expect(result.tree.sizeBytes).toBe(30);
+    expect(result.truncated).toBe(true);
+
+    const rootOnly = pruneTree(tree, { maxChildren: 100, maxNodes: 1 });
+    expect(countNodes(rootOnly.tree)).toBe(1);
+    expect(rootOnly.tree.sizeBytes).toBe(30);
+    expect(rootOnly.prunedNodes).toBe(30);
+  });
+
   it('limits children per node and folds the remainder into one honest aggregate', () => {
     const children = Array.from({ length: 250 }, (_, i) => file(`C:\\root\\f-${i}`, (i + 1) * 1000));
     const tree = folder('C:\\root', children);
@@ -182,12 +199,12 @@ describe('pruneTree depth search', () => {
     }
   });
 
-  it('a budget that cannot be met still returns a tree, never throws', () => {
-    // A budget of one node cannot be honoured while keeping the root, and that must not be a crash.
+  it('a one-node budget keeps the root totals without throwing', () => {
     const chain = makeChain(50);
     const result = pruneTree(chain, { maxChildren: 100, maxNodes: 1 });
-    expect(countNodes(result.tree)).toBeGreaterThanOrEqual(1);
+    expect(countNodes(result.tree)).toBe(1);
     expect(result.tree.sizeBytes).toBe(chain.sizeBytes);
+    expect(result.truncated).toBe(true);
   });
 
   it('the root byte total survives every budget', () => {

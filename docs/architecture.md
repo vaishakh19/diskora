@@ -305,13 +305,15 @@ so the exact set of OS calls is explicit and reviewable:
 | `GetVolumeInformationW` | volume label and filesystem name |
 | `GetCompressedFileSizeW` | on-disk (allocated) size, including sparse and compressed files |
 | `SHQueryRecycleBinW` | Recycle Bin contents |
-| `ShellExecuteW` | "open with the default application" |
 
 On non-Windows targets a portable fallback provides the same functions with honest "not available"
 answers, which is what lets the Rust unit tests run on Linux CI runners.
 
-"Reveal in File Explorer" uses `explorer.exe /select,<path>` with a validated argument. It is a Rust
-command, not a permission granted to the webview.
+Only ordinary folders can be opened in File Explorer; the native command rejects files and
+reparse points. "Reveal in File Explorer" uses `explorer.exe /select,<path>` with a validated
+argument. The executable is resolved from `GetWindowsDirectoryW` rather than searched in the
+working directory or `PATH`. Neither command uses `ShellExecuteW` on a scanned file, so a modified
+webview cannot ask the app to run an `.exe` or script. Neither is a webview shell permission.
 
 ---
 

@@ -66,6 +66,7 @@ export interface BackendTransport {
   listLargeFiles(query: LargeFileQuery): Promise<LargeFilePage>;
   fileDetails(path: string): Promise<FileDetails>;
   revealInExplorer(path: string): Promise<void>;
+  /** Opens an ordinary folder in Explorer; scanned files can only be revealed, never executed. */
   openPath(path: string): Promise<void>;
 
   /* Duplicates */

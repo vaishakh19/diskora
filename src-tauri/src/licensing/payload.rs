@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn masking_reveals_only_the_last_four_characters() {
-        assert_eq!(mask_key("ABCD-1234-EFGH-5678"), "****************5678");
+        assert_eq!(mask_key("ABCD-1234-EFGH-5678"), "***************5678");
         assert_eq!(mask_key("abcd"), "****");
         assert_eq!(mask_key(""), "****");
     }

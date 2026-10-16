@@ -251,8 +251,36 @@ pub struct PruneResult {
 /// equivalent: `src/lib/tree.test.ts` asserts the monotonicity the search relies on, and the
 /// benchmark in `src-tauri/src/bin/bench.rs` measures the cost.
 pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> PruneResult {
-    let max_children = options.max_children.max(2);
-    let max_nodes = options.max_nodes.max(max_children + 1);
+    if root >= index.directories.len() {
+        // Never index an empty/invalid scan result; do not invent filesystem measurements.
+        return PruneResult {
+            tree: TreeNode {
+                id: stable_path_id(Path::new("")),
+                path: String::new(),
+                name: "Scan data unavailable".to_string(),
+                kind: "folder".to_string(),
+                size_bytes: 0,
+                disk_size_bytes: None,
+                file_count: 0,
+                folder_count: 0,
+                modified_at: None,
+                created_at: None,
+                extension: None,
+                category: "other".to_string(),
+                access_denied: false,
+                children: Vec::new(),
+                synthetic: true,
+            },
+            pruned_nodes: 0,
+            truncated: false,
+        };
+    }
+
+    let max_nodes = options.max_nodes.max(1);
+    let max_children = options
+        .max_children
+        .max(2)
+        .min(max_nodes.saturating_sub(1).max(2));
 
     let depth = index_depth(index, root);
     let full_tree = build_limited(index, root, max_children, depth);
@@ -273,10 +301,11 @@ pub fn prune_tree(index: &ScanIndex, root: usize, options: PruneOptions) -> Prun
         }
     }
 
-    // Rebuild once at the deepest level that fits, so the returned result is the best one found.
+    // Rebuild once at the deepest level that fits. Even the shallowest visible children may
+    // exceed a tiny budget, in which case only the root's honest aggregate totals can fit.
     let mut result = build_limited(index, root, max_children, low);
-    if count_nodes(&result.tree) > max_nodes && low > 1 {
-        result = build_limited(index, root, max_children, 1);
+    if count_nodes(&result.tree) > max_nodes {
+        result = build_limited(index, root, max_children, 0);
     }
     finish(result)
 }
@@ -332,7 +361,7 @@ fn build_node(
 
     if depth >= max_depth {
         // Everything below this point is folded into the node's totals.
-        *pruned_nodes += subtree_size(index, position);
+        *pruned_nodes += subtree_size(index, position).saturating_sub(1);
         return node;
     }
 
@@ -451,6 +480,13 @@ fn index_depth(index: &ScanIndex, root: usize) -> usize {
     let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
     while let Some((position, depth)) = stack.pop() {
         deepest = deepest.max(depth);
+        // The tree includes files as one more level below their parent directory.
+        if index
+            .files_by_parent
+            .contains_key(&index.directories[position].path)
+        {
+            deepest = deepest.max(depth + 1);
+        }
         for child in index.children_of(position) {
             stack.push((*child, depth + 1));
         }
@@ -588,6 +624,40 @@ mod tests {
         assert_eq!(result.tree.children.len(), 1);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_wide_root_fits_a_budget_smaller_than_the_child_limit() {
+        let root = temp_dir("wide-budget");
+        for index in 0..30 {
+            fs::write(root.join(format!("f{index}.bin")), [1u8]).unwrap();
+        }
+        let index = ScanIndex::from_run(&scan(&root));
+        let position = index.position_of(&root).unwrap();
+        let result = prune_tree(
+            &index,
+            position,
+            PruneOptions {
+                max_children: 100,
+                max_nodes: 10,
+            },
+        );
+        assert_eq!(count_nodes(&result.tree), 10);
+        assert_eq!(result.tree.size_bytes, 30);
+        assert!(result.truncated);
+        assert!(result.tree.children.iter().any(|child| child.synthetic));
+        let root_only = prune_tree(
+            &index,
+            position,
+            PruneOptions {
+                max_children: 100,
+                max_nodes: 1,
+            },
+        );
+        assert_eq!(count_nodes(&root_only.tree), 1);
+        assert_eq!(root_only.tree.size_bytes, 30);
+        assert_eq!(root_only.pruned_nodes, 30);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -759,6 +829,11 @@ mod tests {
         let index = ScanIndex::default();
         let result = prune_tree(&index, 0, PruneOptions::default());
         assert_eq!(count_nodes(&result.tree), 1);
+        assert_eq!(result.tree.size_bytes, 0);
+        assert!(
+            result.tree.synthetic,
+            "an empty index is not a real disk folder"
+        );
         assert!(!result.truncated);
     }
 

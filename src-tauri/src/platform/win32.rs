@@ -2,16 +2,14 @@
 //!
 //! The bindings are declared by hand rather than pulled from a binding crate so the set of OS
 //! entry points Diskwise uses stays explicit and reviewable: volume metadata, on-disk size,
-//! Recycle Bin query, and "open with the default application". Nothing here can spawn a shell
-//! command, and the webview has no permission to reach any of it directly — the frontend can only
-//! ask for a narrowly-scoped command in `src/commands/`.
+//! and Recycle Bin query. File Explorer is the only executable launched, by fixed name and never
+//! through a shell command. The webview can only ask for a narrowly-scoped native command.
 //!
 //! Every function is `unsafe`-free at the boundary: raw pointers are created and dropped inside
 //! these functions and never escape.
 
-use std::ffi::c_void;
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /* ------------------------------- declarations ------------------------------- */
@@ -19,6 +17,7 @@ use std::sync::OnceLock;
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLogicalDrives() -> u32;
+    fn GetWindowsDirectoryW(lpBuffer: *mut u16, uSize: u32) -> u32;
     fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
     fn GetDiskFreeSpaceExW(
         lpDirectoryName: *const u16,
@@ -42,14 +41,6 @@ extern "system" {
 
 #[link(name = "shell32")]
 extern "system" {
-    fn ShellExecuteW(
-        hwnd: *mut c_void,
-        lpOperation: *const u16,
-        lpFile: *const u16,
-        lpParameters: *const u16,
-        lpDirectory: *const u16,
-        nShowCmd: i32,
-    ) -> *mut c_void;
     fn SHQueryRecycleBinW(pszRootPath: *const u16, pSHQueryRBInfo: *mut ShQueryRbInfo) -> i32;
 }
 
@@ -71,8 +62,6 @@ const DRIVE_CDROM: u32 = 5;
 const DRIVE_RAMDISK: u32 = 6;
 
 const INVALID_FILE_SIZE: u32 = 0xFFFF_FFFF;
-const SW_SHOWNORMAL: i32 = 1;
-const SE_ERR_SUCCESS_THRESHOLD: usize = 32;
 
 /* --------------------------------- helpers --------------------------------- */
 
@@ -322,36 +311,34 @@ pub fn recycle_bin(drive_root: Option<&str>) -> RecycleBinInfo {
 
 /* --------------------------------- open path -------------------------------- */
 
-/// Opens a path with its default application through the shell.
-/// Returns an error message when the shell refuses.
-pub fn open_with_default_app(path: &Path) -> Result<(), String> {
-    let wide_file = wide(path);
-    let wide_verb = wide_str("open");
-    // SAFETY: all wide strings outlive the call; no window handle is required.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            wide_verb.as_ptr(),
-            wide_file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    let value = result as usize;
-    if value <= SE_ERR_SUCCESS_THRESHOLD {
-        return Err(format!(
-            "Windows ShellExecute refused to open {} (code {value}).",
-            path.display()
-        ));
+fn explorer_executable() -> Result<PathBuf, String> {
+    // Resolve the OS directory rather than searching the current directory/PATH for explorer.exe.
+    let mut buffer = [0u16; 32_768];
+    // SAFETY: the array is writable for `buffer.len()` UTF-16 code units.
+    let length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length >= buffer.len() as u32 {
+        return Err("Could not locate the Windows directory.".to_string());
     }
-    Ok(())
+    Ok(
+        PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]))
+            .join("explorer.exe"),
+    )
+}
+
+/// Opens an ordinary folder using the OS-provided File Explorer executable. The native command
+/// rejects files first; passing a path as an argument to Explorer cannot execute that path.
+pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {
+    std::process::Command::new(explorer_executable()?)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not start File Explorer: {error}"))
 }
 
 /// Reveals a path in File Explorer with the item selected.
 pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {
     let argument = format!("/select,{}", path.display());
-    match std::process::Command::new("explorer.exe")
+    match std::process::Command::new(explorer_executable()?)
         .arg(&argument)
         .spawn()
     {

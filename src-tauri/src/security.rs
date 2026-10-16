@@ -406,13 +406,20 @@ fn normalisation_is_idempotent() {
 
 #[test]
 fn no_command_in_the_backend_spawns_a_scanned_file() {
-    // The only process Diskwise ever starts is explorer.exe, with a fixed argument shape.
-    // There is no API anywhere in the command surface that takes a command line.
-    let source = include_str!("commands/files.rs");
-    assert!(source.contains("explorer.exe"));
-    assert!(!source.contains("Command::new(path"));
-    assert!(!source.contains("cmd.exe"));
-    assert!(!source.contains("powershell"));
+    // The command validates ordinary folders before delegating to a fixed Explorer executable;
+    // never use ShellExecuteW with an arbitrary scanned path (it could launch an .exe or script).
+    let commands = include_str!("commands/files.rs");
+    let platform = include_str!("platform/win32.rs");
+    assert!(commands.contains("validate_open_folder(&candidate)?"));
+    assert!(commands.contains("platform::open_folder_in_explorer(&candidate)"));
+    assert!(platform.contains("GetWindowsDirectoryW"));
+    assert!(platform.contains("Command::new(explorer_executable()?)"));
+    assert!(!platform.contains("ShellExecuteW"));
+    for source in [commands, platform] {
+        assert!(!source.contains("Command::new(path"));
+        assert!(!source.contains("cmd.exe"));
+        assert!(!source.contains("powershell"));
+    }
 }
 
 #[test]
